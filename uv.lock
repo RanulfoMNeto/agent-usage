@@ -4,7 +4,7 @@ requires-python = ">=3.12, <3.15"
 
 [[package]]
 name = "agent-usage-widget"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "pyside6-webengine" },
