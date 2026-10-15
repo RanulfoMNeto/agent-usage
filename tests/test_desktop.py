@@ -61,9 +61,13 @@ class DesktopTests(unittest.TestCase):
             "claude": {"path": str(self.root), "override": "", "exists": True},
         }
         self.bridge = Bridge(self.usage, Mock(), self.settings, self.window)
-        self.addCleanup(self.bridge.close)
         self.responses = []
         self.bridge.reply.connect(lambda _, body: self.responses.append(json.loads(body)))
+
+    def tearDown(self):
+        self.bridge.close()
+        self.window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_only_packaged_assets_and_channel_are_accessible(self):
         interceptor = LocalOnly()

@@ -1,0 +1,16 @@
+Agent Usage uses Qt for Python (PySide6) and Qt 6.12.
+Copyright (C) The Qt Company Ltd. and other contributors.
+
+Qt and PySide are separate from Agent Usage's MIT-licensed application code.
+The LGPLv3 and GPLv3 license texts accompany this notice. The libraries are
+loaded dynamically and can be replaced within the portable bundle.
+
+Corresponding upstream source and module-specific notices:
+https://code.qt.io/cgit/pyside/pyside-setup.git/?h=6.12.0
+https://code.qt.io/cgit/qt/qtbase.git/?h=v6.12.0
+https://code.qt.io/cgit/qt/qtdeclarative.git/?h=v6.12.0
+https://code.qt.io/cgit/qt/qtwebengine.git/?h=v6.12.0
+https://doc.qt.io/qt-6/qtwebengine-licensing.html
+
+Qt WebEngine includes Chromium and other third-party components under their
+respective licenses; their notices are included in Qt WebEngine's resources.

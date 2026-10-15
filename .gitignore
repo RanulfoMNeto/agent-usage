@@ -19,3 +19,4 @@ build/
 agent-usage-history*.json
 settings.ini
 widget.lock
+*.spec

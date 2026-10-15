@@ -7,25 +7,30 @@ name = "agent-usage-widget"
 version = "0.1.0"
 description = "A local desktop widget for Codex and Claude Code usage"
 readme = "README.md"
-requires-python = ">=3.11,<3.16"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
 dependencies = ["PySide6-WebEngine==6.12.0.140"]
 
-[project.gui-scripts]
+[project.scripts]
 agent-usage = "usage.__main__:main"
 
 [dependency-groups]
 dev = ["ruff==0.16.8", "pip-audit==2.9.0"]
+build = ["pyinstaller==6.22.3"]
+
+[project.urls]
+Homepage = "https://github.com/RanulfoMNeto/agent-usage"
+Issues = "https://github.com/RanulfoMNeto/agent-usage/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["usage"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/usage", "/tests", "/pyproject.toml", "/README.md", "/LICENSE", "/uv.lock"]
+include = ["/usage", "/tests", "/scripts", "/pyproject.toml", "/README.md", "/LICENSE", "/uv.lock", "/.github/assets"]
 
 [tool.ruff]
 required-version = "==0.16.8"
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
