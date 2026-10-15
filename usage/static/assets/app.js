@@ -484,6 +484,60 @@ function quotaCard(provider, item, multipleBuckets) {
   return card;
 }
 
+const CONNECTION_MESSAGES = {
+  not_found: ['Codex not found', 'Install Codex or its official VS Code extension in this environment.'],
+  login_required: ['Sign in required', 'Connect with your ChatGPT account in Settings → Connections.'],
+  unsupported_account: ['ChatGPT login required', 'API-key accounts do not provide subscription limits.'],
+  login_cancelled: ['Connection cancelled', 'No new connection was established.'],
+  timeout: ['Connection timed out', 'Try connecting again.'],
+  query_failed: ['Limits unavailable', 'The native account query failed.'],
+  claude_waiting: ['Waiting for terminal', 'Restart Claude Code in a terminal and complete a request with your subscription.'],
+  claude_no_limits: ['No limits reported', 'Claude has supplied a snapshot without subscription limits.'],
+  claude_not_found: ['Claude profile not found', 'Start Claude Code in this environment before enabling capture.'],
+  claude_setup_required: ['Setup required', 'Set up or repair terminal capture in Settings → Connections.'],
+  claude_setup_failed: ['Check Claude settings', 'Claude settings could not be read. Check file permissions and valid JSON.'],
+};
+function connectionMessage(provider) {
+  if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Receiving limits', ''];
+  return CONNECTION_MESSAGES[provider?.issue] || ['Limits unavailable', 'No current account limits were reported.'];
+}
+let connecting = false, cancelling = false, capturing = false;
+function renderConnections() {
+  for (const [key, agent] of [['codex', 'Codex'], ['claude', 'Claude Code']]) {
+    const provider = providers.find(p => p.agent === agent);
+    const [label, hint] = connectionMessage(provider);
+    $(key + '-connection').textContent = key === 'codex' && connecting ? 'Finish sign-in in your browser' : subscriptionsLoaded ? label : 'Checking…';
+    $(key + '-connection').title = hint;
+    const button = document.querySelector('[data-connect="' + key + '"]');
+    button.disabled = key === 'codex' ? cancelling : capturing;
+    button.textContent = key === 'codex' ? (connecting ? 'Cancel' : provider?.windows?.length ? 'Check' : 'Connect')
+      : provider?.issue === 'claude_waiting' || provider?.issue === 'claude_no_limits' ? 'Check setup' : 'Enable CLI capture';
+  }
+}
+$('agent-connections').addEventListener('click', async event => {
+  const button = event.target.closest('[data-connect]');
+  if (!button) return;
+  const agent = button.dataset.connect;
+  settingsMessage();
+  if (agent === 'codex' && connecting) {
+    cancelling = true; renderConnections();
+    try { await native('cancel_login', agent); } catch (error) { settingsMessage(error.message); }
+    return;
+  }
+  if (agent === 'codex') { connecting = true; renderConnections(); }
+  else { capturing = true; renderConnections(); }
+  try {
+    const result = await native('connect', agent);
+    if (result.cancelled) return;
+    if (result.providers) { providers = result.providers; subscriptionsLoaded = true; }
+    else {
+      settingsMessage(connectionMessage(result)[1]);
+      await refresh('subscriptions');
+    }
+  } catch (error) { settingsMessage(error.message); }
+  finally { if (agent === 'codex') { connecting = false; cancelling = false; } else capturing = false; render(); }
+});
+
 function renderSubscriptions() {
   const visible = activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter);
   const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent))
@@ -500,21 +554,11 @@ function renderSubscriptions() {
   }));
   for (const provider of missing) {
     const { agent } = provider;
-    const [label, hint] = {
-      not_found: ['Codex not found', 'Install the Codex CLI or its official VS Code extension.'],
-      login_required: ['Sign in required', 'Sign in to Codex with ChatGPT in this Windows or Linux environment.'],
-      unsupported_account: ['ChatGPT login required', 'This account does not provide ChatGPT subscription limits.'],
-      timeout: ['Connection timed out', 'The account query timed out. Retrying automatically.'],
-      query_failed: ['Limits unavailable', 'The native account query failed. Retrying automatically.'],
-      claude_waiting: ['Waiting for Claude CLI', 'Complete a request in Claude Code terminal mode with your subscription. The VS Code chat panel does not supply this status-line snapshot.'],
-      claude_no_limits: ['No limits reported', 'The status line is connected, but Claude has not supplied subscription limits. Complete a request using an eligible subscription account.'],
-      claude_not_found: ['Claude not detected', 'Start Claude Code in this environment, then reopen the widget to connect its status line.'],
-      claude_custom_statusline: ['Custom status line', 'Your existing Claude status line was preserved. See the README to connect its output.'],
-      claude_setup_failed: ['Setup unavailable', 'Claude settings could not be updated. Check file permissions and valid JSON, then reopen the widget.'],
-      claude_setup_disabled: ['Setup disabled', 'Automatic Claude status-line setup is disabled in the widget configuration.'],
-    }[provider.issue] || ['Limits unavailable', 'No current account limits were reported.'];
+    const [label, hint] = connectionMessage(provider);
     const row = el('div', undefined, 'quota-unavailable');
-    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), el('span', label, 'caption'));
+    const action = el('button', label, 'text-button caption');
+    action.addEventListener('click', () => openSettings(true));
+    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), action);
     row.title = hint;
     $('subscriptions').append(row);
   }
@@ -522,7 +566,7 @@ function renderSubscriptions() {
 }
 
 function render() {
-  updateAgents(); updateProjects(); renderSubscriptions(); renderActivity();
+  updateAgents(); updateProjects(); renderSubscriptions(); renderConnections(); renderActivity();
   for (const name of ['codex', 'claude']) {
     $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0;
   }
@@ -558,9 +602,10 @@ function changePeriod(value) {
   savePreferences(); promptId = null; bucketId = null; hideHeatmapTooltip(); render();
 }
 
-async function openSettings() {
+async function openSettings(connections = false) {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
   $('view-setting').value = preferences.view; $('style-setting').value = preferences.style; $('pinned-setting').checked = preferences.pinned;
+  if (connections) $('agent-connections').open = true;
   $('settings').showModal(); reportSize();
   try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
 }

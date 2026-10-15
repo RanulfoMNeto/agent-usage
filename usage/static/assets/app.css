@@ -198,6 +198,10 @@ dialog::backdrop { background: transparent; }
 .source-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .source-path svg { width: 15px; height: 15px; margin-left: auto; flex-shrink: 0; fill: none; stroke: var(--muted); stroke-width: 1.5; }
 .source-path:hover { background: var(--line); }
+.agent-connection { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0; }
+.agent-connection > div { min-width: 0; }
+.agent-connection .setting-action { flex: 0 0 auto; padding: 9px 12px; }
+.agent-connection .source-label { margin-bottom: 4px; }
 #settings-status { margin-top: 12px; }
 .switch { appearance: none; width: 30px; height: 18px; padding: 3px; margin: 0; border-radius: var(--control-radius); background: var(--track); cursor: pointer; }
 .switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); }

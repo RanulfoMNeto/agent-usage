@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from usage.config import load_config, user_directory
 from usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
@@ -102,6 +102,51 @@ class DesktopTests(unittest.TestCase):
             self.bridge.request("3", "choose_directory", '"codex"')
         self.assertEqual(self.responses[-1], {"cancelled": True})
         self.usage.set_sources.assert_not_called()
+
+    def test_connections_are_explicit_and_custom_capture_requires_confirmation(self):
+        self.bridge.subscriptions.config_path = None
+        with (
+            patch(
+                "usage.desktop.install_claude_statusline", return_value="claude_custom_statusline"
+            ) as install,
+            patch(
+                "usage.desktop.QMessageBox.question", return_value=QMessageBox.StandardButton.No
+            ) as confirm,
+        ):
+            self.bridge.request("1", "connect", '"claude"')
+            self.assertEqual(self.responses[-1], {"cancelled": True})
+            install.assert_called_once_with(None)
+            confirm.return_value = QMessageBox.StandardButton.Yes
+            install.side_effect = ["claude_custom_statusline", "claude_waiting"]
+            self.bridge.request("2", "connect", '"claude"')
+            install.assert_called_with(None, replace=True)
+            self.assertEqual(self.responses[-1], {"issue": "claude_waiting"})
+            install.reset_mock()
+            self.window.config = {"demo": True}
+            self.bridge.request("3", "connect", '"claude"')
+            self.assertIn("error", self.responses[-1])
+            install.assert_not_called()
+            self.window.config = {}
+            self.bridge.request("4", "connect", '"arbitrary-command"')
+            self.assertIn("error", self.responses[-1])
+            install.assert_not_called()
+            self.bridge.request("5", "cancel_login", '"codex"')
+            self.bridge.subscriptions.cancel_login.assert_called_once_with()
+
+        with patch("usage.desktop.QDesktopServices.openUrl", return_value=True) as open_url:
+            self.bridge.open_login("https://auth.openai.com/oauth/authorize")
+            open_url.assert_called_once()
+            open_url.reset_mock()
+            for url in (
+                "file:///tmp/command",
+                "https://auth.openai.com@evil.example",
+                "https://example.com",
+            ):
+                self.bridge.open_login(url)
+            open_url.assert_not_called()
+            self.window.config = {"demo": True}
+            self.bridge.open_login("https://auth.openai.com/oauth/authorize")
+            open_url.assert_not_called()
 
     def test_project_picker_preserves_sources_and_cancelled_selection(self):
         self.settings.setValue("appearance", json.dumps({"project": str(self.root)}))
@@ -312,6 +357,15 @@ class DesktopTests(unittest.TestCase):
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertEqual(evaluate(geometry), settings_geometry)
+                        window.page().runJavaScript("$('agent-connections').open=true")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertGreater(window.height(), settings_geometry[1])
+                        self.assertEqual(evaluate(geometry)[-1], settings_geometry[-1])
+                        window.page().runJavaScript("$('agent-connections').open=false")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertEqual(evaluate(geometry), settings_geometry)
                         window.page().runJavaScript("$('settings').close()")
                         QTest.qWait(80)
                         wait_for(bounds)
@@ -387,10 +441,10 @@ class DesktopTests(unittest.TestCase):
                     ("Codex", "not_found", "Codex not found"),
                     ("Codex", "login_required", "Sign in required"),
                     ("Codex", "unsupported_account", "ChatGPT login required"),
-                    ("Claude Code", "claude_waiting", "Waiting for Claude CLI"),
+                    ("Claude Code", "claude_waiting", "Waiting for terminal"),
                     ("Claude Code", "claude_no_limits", "No limits reported"),
-                    ("Claude Code", "claude_custom_statusline", "Custom status line"),
-                    ("Claude Code", "claude_setup_failed", "Setup unavailable"),
+                    ("Claude Code", "claude_setup_required", "Setup required"),
+                    ("Claude Code", "claude_setup_failed", "Check Claude settings"),
                 ):
                     window.page().runJavaScript(
                         f"providers=[{{agent:'{agent}',windows:[],issue:'{issue}'}}];render()"

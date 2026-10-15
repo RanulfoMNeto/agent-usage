@@ -84,6 +84,12 @@
       <div class="setting-row"><label for="view-setting">View</label><div class="select-field"><select id="view-setting"><option value="normal">Normal</option><option value="compact" title="Subscription usage only">Compact</option></select></div></div>
       <div class="setting-row"><label for="style-setting">Style</label><div class="select-field"><select id="style-setting"><option value="minimal">Default</option><option value="glass">Glassmorphism</option><option value="brutalist">Neo-Brutalism</option><option value="neumorphic">Neumorphism</option><option value="swiss">Swiss Design</option></select></div></div>
       <div class="setting-row"><label for="pinned-setting">Keep on top</label><input id="pinned-setting" class="switch" type="checkbox" role="switch"></div>
+      <details id="agent-connections" class="source-settings">
+        <summary>Connections<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></summary>
+        <div class="agent-connection"><div><span class="source-label"><img class="agent-icon" data-agent="Codex" src="assets/chatgpt.svg" alt="">Codex</span><span id="codex-connection" class="caption" role="status">Checking…</span></div><button class="setting-action" data-connect="codex">Connect</button></div>
+        <div class="agent-connection"><div><span class="source-label"><img class="agent-icon" data-agent="Claude Code" src="assets/claude.svg" alt="">Claude</span><span id="claude-connection" class="caption" role="status">Checking…</span></div><button class="setting-action" data-connect="claude">Enable CLI capture</button></div>
+        <p class="caption">Claude limits need terminal use. VS Code chat alone is not supported.</p>
+      </details>
       <div class="project-setting"><div class="source-label"><label for="project">Project</label><button id="project-reset" class="text-button" hidden>Reset</button></div><button id="project" class="source-path" aria-label="Choose project directory"><span>All projects</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button></div>
       <details id="source-settings" class="source-settings">
         <summary>Sources<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></summary>
