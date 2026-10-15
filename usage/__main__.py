@@ -42,7 +42,8 @@ def main():
             from usage.integration import launch_command
 
             command = shlex.join(
-                [str(Path(arg).as_posix()) for arg in launch_command()] + ["--capture-claude"]
+                [str(Path(arg).as_posix()) for arg in launch_command(args.config)]
+                + ["--capture-claude"]
             )
             print(json.dumps({"statusLine": {"type": "command", "command": command}}, indent=2))
             return

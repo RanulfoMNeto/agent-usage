@@ -17,14 +17,15 @@ def command(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=15).stdout
 
 
-def launch_command():
-    return [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "usage"]
+def launch_command(config=None):
+    args = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "usage"]
+    if config:
+        args.extend(["--config", str(Path(config).resolve())])
+    return args
 
 
 def desktop_entry(config=None):
-    args = launch_command()
-    if config:
-        args.extend(["--config", str(Path(config).resolve())])
+    args = launch_command(config)
     quoted = []
     for arg in args:
         if any(ord(c) < 32 for c in arg):

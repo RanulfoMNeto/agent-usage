@@ -44,31 +44,43 @@ class CLITests(unittest.TestCase):
 
     def test_generated_claude_config_captures_only_quota_fields(self):
         with profile() as (config, _):
-            process = subprocess.run(
-                [sys.executable, "-m", "usage", "--claude-config"],
-                check=True,
-                capture_output=True,
-                text=True,
+            root = Path(os.environ["CODEX_HOME"]).parent
+            override = root / "custom config.toml"
+            custom_capture = root / "custom limits.json"
+            override.write_text(
+                "[subscriptions]\nclaude_file = " + json.dumps(custom_capture.as_posix()) + "\n"
             )
-            command = shlex.split(json.loads(process.stdout)["statusLine"]["command"])
-            result = subprocess.run(
-                command,
-                input=json.dumps(
-                    {
-                        "cwd": "PRIVATE",
-                        "rate_limits": {
-                            "seven_day": {"used_percentage": 42, "resets_at": 2000000000}
-                        },
-                    }
-                ),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertIn("42%", result.stdout)
-            captured = Path(config["subscriptions"]["claude_file"]).read_text()
-            self.assertNotIn("PRIVATE", captured)
-            self.assertEqual(json.loads(captured)["windows"][0]["used_percent"], 42)
+            for options, capture in (
+                ([], Path(config["subscriptions"]["claude_file"])),
+                (["--config", str(override)], custom_capture),
+            ):
+                with self.subTest(options=options):
+                    process = subprocess.run(
+                        [sys.executable, "-m", "usage", "--claude-config", *options],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    command = shlex.split(json.loads(process.stdout)["statusLine"]["command"])
+                    result = subprocess.run(
+                        command,
+                        cwd=root,
+                        input=json.dumps(
+                            {
+                                "cwd": "PRIVATE",
+                                "rate_limits": {
+                                    "seven_day": {"used_percentage": 42, "resets_at": 2000000000}
+                                },
+                            }
+                        ),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertIn("42%", result.stdout)
+                    captured = capture.read_text()
+                    self.assertNotIn("PRIVATE", captured)
+                    self.assertEqual(json.loads(captured)["windows"][0]["used_percent"], 42)
 
     def test_packaged_launcher_does_not_invoke_python_module(self):
         with patch.object(sys, "frozen", True, create=True):
