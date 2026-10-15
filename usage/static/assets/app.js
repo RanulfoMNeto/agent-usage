@@ -612,21 +612,12 @@ $('heatmap-scroll').addEventListener('scroll', hideHeatmapTooltip);
 new ResizeObserver(([entry]) => {
   $('heatmap-labels').style.height = entry.contentRect.height + 'px';
 }).observe($('heatmap-grid'));
-let normalHeight = 0, layoutRequest = '';
+let layoutRequest = '';
 function reportSize() {
   if (document.documentElement.dataset.layoutView !== preferences.view) return;
-  const widget = document.querySelector('.widget'), dialog = $('settings');
-  const measure = panel => {
-    const css = getComputedStyle(panel);
-    const contentHeight = parseFloat(getComputedStyle(panel.querySelector('.panel-content')).height);
-    return Math.ceil(contentHeight + parseFloat(css.paddingTop) + parseFloat(css.paddingBottom) + parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth));
-  };
-  const compactView = preferences.view === 'compact';
-  const widgetHeight = measure(widget), settingsHeight = measure(dialog);
-  if (!compactView) normalHeight = Math.max(normalHeight, widgetHeight, settingsHeight);
-  document.documentElement.style.setProperty('--panel-height', (compactView ? 0 : normalHeight) + 'px');
-  const height = compactView ? (dialog.open ? settingsHeight : widgetHeight) : normalHeight;
-  const args = { height: height + 24, fit_height: (compactView ? Math.max(widgetHeight, settingsHeight) : normalHeight) + 24, compact: compactView };
+  const panel = $('settings').open ? $('settings') : document.querySelector('.widget');
+  const height = Math.ceil(parseFloat(getComputedStyle(panel).height)) + 24;
+  const args = { height, compact: preferences.view === 'compact' };
   const request = JSON.stringify(args);
   if (request === layoutRequest) return;
   layoutRequest = request;

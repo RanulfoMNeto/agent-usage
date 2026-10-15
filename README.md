@@ -31,8 +31,9 @@ Demo mode creates six months of fictional native sessions in a temporary profile
 It makes no account queries and removes its profile on normal exit. It does not
 require Codex or Claude Code. Close it to return to your real profile.
 
-Drag the header to move the widget. **Compact** shows limits; **Normal** adds
-activity. Click a day in **Weekly** or **History** to inspect its chart and totals.
+Drag the header to move the widget. Its height automatically fits the visible
+content. **Compact** shows limits; **Normal** adds activity. Click a day in
+**Weekly** or **History** to inspect its chart and totals.
 Hover previews; clicking selects. Settings controls appearance, warnings, projects
 and sources. The close button quits the app.
 

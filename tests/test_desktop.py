@@ -173,9 +173,6 @@ class DesktopTests(unittest.TestCase):
                 {"height": True, "compact": True},
                 {"height": "300", "compact": True},
                 {"height": 300, "compact": "true"},
-                {"height": 300, "compact": True, "fit_height": 299},
-                {"height": 300, "compact": True, "fit_height": 10001},
-                {"height": 300, "compact": True, "fit_height": True},
                 {"height": 300},
                 None,
             ):
@@ -191,7 +188,7 @@ class DesktopTests(unittest.TestCase):
             window.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
-    def test_days_and_settings_keep_geometry_and_agent_colors(self):
+    def test_visible_content_controls_height_without_overflow(self):
         now = time.time()
         self.usage.snapshot.return_value = {
             "rows": [
@@ -250,7 +247,7 @@ class DesktopTests(unittest.TestCase):
                 document.documentElement.scrollWidth<=innerWidth+1;
         })()"""
         screen = Mock()
-        screen.availableGeometry.return_value = QRect(0, 0, 1280, 600)
+        screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
         try:
             with patch.object(window, "screen", return_value=screen):
                 window.show()
@@ -293,20 +290,46 @@ class DesktopTests(unittest.TestCase):
                                 getComputedStyle(n).backgroundColor)).size"""),
                             1,
                         )
-                        # Select a real empty cell, then open Settings and its source controls.
-                        for script in (
+                        # Empty days retain the chart's space; hidden Settings reserve none.
+                        window.page().runJavaScript(
                             "[...$('heatmap-grid').children].find(c=>!c.disabled&&"
-                            "c.dataset.level==='0').click()",
-                            "openSettings();$('source-settings').open=true",
-                            "$('settings').close()",
-                        ):
-                            window.page().runJavaScript(script)
-                            QTest.qWait(80)
-                            wait_for(bounds)
-                            self.assertEqual(evaluate(geometry), baseline)
+                            "c.dataset.level==='0').click()"
+                        )
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertEqual(evaluate(geometry), baseline)
+                        window.page().runJavaScript("openSettings()")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        settings_geometry = evaluate(geometry)
+                        self.assertLess(settings_geometry[1], baseline[1])
+                        self.assertEqual(settings_geometry[-1], baseline[-1])
+                        window.page().runJavaScript("$('source-settings').open=true")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertGreater(window.height(), settings_geometry[1])
+                        window.page().runJavaScript("$('source-settings').open=false")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertEqual(evaluate(geometry), settings_geometry)
+                        window.page().runJavaScript("$('settings').close()")
+                        QTest.qWait(80)
+                        wait_for(bounds)
+                        self.assertEqual(evaluate(geometry), baseline)
                         self.assertEqual(evaluate("$('bucket-prompts').textContent"), "0")
                         self.assertEqual(evaluate("$('bucket-tokens').textContent"), "—")
                         self.assertTrue(evaluate("!$('usage-empty').hidden"))
+                # Period changes shrink and grow in both directions without retaining a maximum.
+                heights = {}
+                for period in ("all", "weekly", "today", "weekly", "all"):
+                    window.page().runJavaScript(f"changePeriod('{period}')")
+                    QTest.qWait(100)
+                    wait_for(bounds)
+                    if period in heights:
+                        self.assertEqual(window.height(), heights[period])
+                    heights[period] = window.height()
+                self.assertLess(heights["today"], heights["weekly"])
+                self.assertLess(heights["weekly"], heights["all"])
                 # Use the actual preference control to exercise the native width handshake.
                 window.page().runJavaScript(
                     "$('view-setting').value='compact';"
@@ -315,11 +338,17 @@ class DesktopTests(unittest.TestCase):
                 QTest.qWait(100)
                 wait_for(bounds)
                 self.assertTrue(window.compact)
+                compact_height = window.height()
                 compact_close = evaluate(geometry)[-1]
                 window.page().runJavaScript("openSettings()")
                 QTest.qWait(100)
                 wait_for(bounds)
+                self.assertNotEqual(window.height(), compact_height)
                 self.assertEqual(evaluate(geometry)[-1], compact_close)
+                window.page().runJavaScript("$('settings').close()")
+                QTest.qWait(100)
+                wait_for(bounds)
+                self.assertEqual(window.height(), compact_height)
                 window.page().runJavaScript(
                     "$('view-setting').value='normal';"
                     "$('view-setting').dispatchEvent(new Event('change'));$('settings').close()"
@@ -327,6 +356,20 @@ class DesktopTests(unittest.TestCase):
                 QTest.qWait(100)
                 wait_for(bounds)
                 self.assertFalse(window.compact)
+                # A smaller monitor still fits every active panel without a vertical scrollbar.
+                screen.availableGeometry.return_value = QRect(0, 0, 1280, 600)
+                window.apply_size()
+                for script in (
+                    "changePeriod('all')",
+                    "openSettings();$('source-settings').open=true",
+                    "$('source-settings').open=false",
+                    "$('settings').close()",
+                    "changePeriod('today')",
+                ):
+                    window.page().runJavaScript(script)
+                    QTest.qWait(100)
+                    wait_for(bounds)
+                    self.assertTrue(screen.availableGeometry().contains(window.geometry()))
                 # Restoring a larger screen also restores the natural size.
                 screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
                 window.apply_size()

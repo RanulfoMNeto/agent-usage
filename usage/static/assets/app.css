@@ -2,7 +2,7 @@
 @font-face { font-family: 'Baloo 2'; src: url('baloo2.woff2') format('woff2'); font-weight: 700 800; font-display: swap; }
 /* Shared geometry and agent colors; styles only change neutral surfaces and depth. */
 :root {
-  --layout-width: 100vw; --layout-scale: 1; --panel-height: 0px; --panel-padding: 16px;
+  --layout-width: 100vw; --layout-scale: 1; --panel-padding: 16px;
   font-family: Inter, system-ui, sans-serif; color-scheme: light;
   --surface: #fafafa; --raised: #eeeff0; --text: #24272b; --muted: #626970;
   --line: #d8dde0; --track: #e1e6e6; --codex: #367b78; --claude: #d97757; --warning: var(--text);
@@ -58,14 +58,13 @@
 html { background: transparent; overflow: clip; }
 body { margin: 0; height: 100vh; overflow: clip; background: transparent; color: var(--text); font-size: 12px; -webkit-font-smoothing: antialiased; }
 body:has(dialog[open]) .widget { visibility: hidden; }
-dialog:not([open]) { display: block; visibility: hidden; pointer-events: none; }
 [hidden] { display: none !important; }
 h1, h2, p, dl { margin: 0; }
 button, select { font: inherit; color: inherit; cursor: pointer; }
 :focus-visible { outline: 2px solid var(--codex); outline-offset: 3px; }
 /* Transform preserves natural layout measurements while fitting either panel. */
 .widget, dialog { position: fixed; inset: calc(12px * var(--layout-scale)) auto auto calc(12px * var(--layout-scale)); margin: 0; width: calc(var(--layout-width) - 24px); transform: scale(var(--layout-scale)); transform-origin: top left; }
-.widget, dialog { min-height: var(--panel-height); padding: var(--panel-padding); }
+.widget, dialog { padding: var(--panel-padding); }
 .panel-content { display: flow-root; }
 .widget { border: var(--stroke) solid var(--edge); border-radius: var(--radius); background: var(--shell); box-shadow: var(--shadow); }
 :root[data-demo='true'] .widget::after { content: 'Demo'; position: absolute; bottom: 3px; left: 0; right: 0; text-align: center; color: var(--muted); font-size: 8px; pointer-events: none; }
