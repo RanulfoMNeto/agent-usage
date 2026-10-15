@@ -178,6 +178,10 @@ class SubscriptionTests(unittest.TestCase):
             self.assertEqual(first[0]["status"], "available")
             self.assertEqual(first[1]["status"], "stale")
             self.assertEqual(len(first[1]["windows"]), 1)
+            capture_claude(path, {})
+            self.assertEqual(source.snapshot()["providers"][1]["issue"], "claude_no_limits")
+            path.unlink()
+            self.assertEqual(source.snapshot()["providers"][1]["issue"], "claude_waiting")
             for error, issue in (
                 (RuntimeError("SECRET"), "query_failed"),
                 (FileNotFoundError("PRIVATE"), "not_found"),

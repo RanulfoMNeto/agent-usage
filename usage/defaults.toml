@@ -5,6 +5,10 @@ refresh_seconds = 1
 width = 400
 compact_width = 300
 
+[integrations]
+windows_shortcut = true
+claude_statusline = true
+
 [transcripts]
 codex = "~/.codex"
 claude = "~/.claude/projects"

@@ -506,6 +506,12 @@ function renderSubscriptions() {
       unsupported_account: ['ChatGPT login required', 'This account does not provide ChatGPT subscription limits.'],
       timeout: ['Connection timed out', 'The account query timed out. Retrying automatically.'],
       query_failed: ['Limits unavailable', 'The native account query failed. Retrying automatically.'],
+      claude_waiting: ['Waiting for Claude CLI', 'Complete a request in Claude Code terminal mode with your subscription. The VS Code chat panel does not supply this status-line snapshot.'],
+      claude_no_limits: ['No limits reported', 'The status line is connected, but Claude has not supplied subscription limits. Complete a request using an eligible subscription account.'],
+      claude_not_found: ['Claude not detected', 'Start Claude Code in this environment, then reopen the widget to connect its status line.'],
+      claude_custom_statusline: ['Custom status line', 'Your existing Claude status line was preserved. See the README to connect its output.'],
+      claude_setup_failed: ['Setup unavailable', 'Claude settings could not be updated. Check file permissions and valid JSON, then reopen the widget.'],
+      claude_setup_disabled: ['Setup disabled', 'Automatic Claude status-line setup is disabled in the widget configuration.'],
     }[provider.issue] || ['Limits unavailable', 'No current account limits were reported.'];
     const row = el('div', undefined, 'quota-unavailable');
     row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), el('span', label, 'caption'));

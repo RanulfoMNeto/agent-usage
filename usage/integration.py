@@ -1,8 +1,10 @@
 """Native desktop launchers and optional GNOME integration."""
 
 import ast
+import base64
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,89 @@ def launch_command(config=None):
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     return args
+
+
+def claude_command(config=None):
+    """Quote once for Claude's shell; Windows supports both Git Bash and PowerShell."""
+    args = [Path(arg).as_posix() for arg in launch_command(config)] + ["--capture-claude"]
+    if sys.platform == "win32":
+        quoted = " ".join("'" + arg.replace("'", "''") + "'" for arg in args)
+        script = "# Agent Usage status line\n$input | & " + quoted + "; exit $LASTEXITCODE"
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
+    return shlex.join(args)
+
+
+def owns_claude_command(command):
+    """Recognize our generated commands, including the previous manual installation."""
+    if not isinstance(command, str):
+        return False
+    try:
+        args = shlex.split(command)
+        if args[:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"]:
+            return len(args) == 5 and base64.b64decode(args[4], validate=True).decode(
+                "utf-16-le"
+            ).startswith("# Agent Usage status line\n")
+        executable = Path(args.pop(0)).name.lower()
+        if args[:1] == ["-I"]:
+            args = args[1:]
+        if args[:2] == ["-m", "usage"] and executable.startswith("python"):
+            args = args[2:]
+        elif executable not in ("agent-usage", "agent-usage.exe"):
+            return False
+        if args[:1] == ["--config"] and len(args) >= 3:
+            args = args[2:]
+        return args == ["--capture-claude"]
+    except (ValueError, IndexError, UnicodeError):
+        return False
+
+
+def install_claude_statusline(config=None):
+    """Install or relocate our capture command without replacing a custom status line."""
+    from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
+
+    directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+    if not directory.is_dir():
+        return "claude_not_found"
+    path = directory / "settings.json"
+    lock = QLockFile(str(path) + ".agent-usage.lock")
+    if not lock.tryLock(0):
+        raise OSError("Claude settings are busy")
+    try:
+        original = path.read_bytes() if path.exists() else None
+        settings = json.loads(original.decode("utf-8-sig")) if original is not None else {}
+        if not isinstance(settings, dict):
+            raise ValueError("Invalid Claude settings")
+        previous = settings.get("statusLine")
+        if previous is not None and (
+            not isinstance(previous, dict)
+            or previous.get("type") != "command"
+            or not owns_claude_command(previous.get("command"))
+        ):
+            return "claude_custom_statusline"
+        statusline = {**(previous or {}), "type": "command", "command": claude_command(config)}
+        if previous == statusline:
+            return "claude_waiting"
+        settings["statusLine"] = statusline
+        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        backup = path.with_name("settings.json.agent-usage.bak")
+        if original is not None and not backup.exists():
+            with backup.open("xb") as stream:
+                if os.name != "nt":
+                    os.fchmod(stream.fileno(), 0o600)
+                stream.write(original)
+        output = QSaveFile(str(path))
+        if not output.open(QIODevice.OpenModeFlag.WriteOnly):
+            raise OSError("Claude settings are not writable")
+        current = path.read_bytes() if path.exists() else None
+        if current != original or output.write(body) != len(body):
+            output.cancelWriting()
+            raise OSError("Claude settings changed during setup")
+        if not output.commit():
+            raise OSError("Could not save Claude settings")
+        return "claude_waiting"
+    finally:
+        lock.unlock()
 
 
 def install_windows_shortcut(config=None):
