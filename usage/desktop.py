@@ -115,12 +115,9 @@ class Bridge(QObject):
                     or type(args.get("height")) is not int
                     or not 0 < args["height"] <= 10000
                     or type(args.get("compact")) is not bool
-                    or type(args.get("fit_height", args["height"])) is not int
-                    or not args["height"] <= args.get("fit_height", args["height"]) <= 10000
                 ):
                     raise ValueError("Invalid content layout")
                 self.window.content_height = args["height"]
-                self.window.fit_height = args.get("fit_height", args["height"])
                 self.window.compact = args["compact"]
                 self.window.apply_size()
                 self.respond(identifier, {})
@@ -213,7 +210,6 @@ class Widget(QWebEngineView):
         super().__init__()
         self.config = config
         self.content_height = 120
-        self.fit_height = 120
         self.layout_width = config["width"]
         self.layout_scale = 1
         self.compact = False
@@ -299,7 +295,7 @@ class Widget(QWebEngineView):
             width = min(width, self.config["compact_width"])
         self.layout_width = width
         height = max(120, self.content_height)
-        scale = min(1, screen.width() / width, screen.height() / max(height, self.fit_height))
+        scale = min(1, screen.width() / width, screen.height() / height)
         self.layout_scale = scale
         self.resize(
             min(screen.width(), math.ceil(width * scale)),
