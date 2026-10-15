@@ -75,10 +75,10 @@ class CLITests(unittest.TestCase):
                                 },
                             }
                         ),
-                        check=True,
                         capture_output=True,
                         text=True,
                     )
+                    self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
                     self.assertIn("42%", result.stdout)
                     captured = capture.read_text()
                     self.assertNotIn("PRIVATE", captured)
