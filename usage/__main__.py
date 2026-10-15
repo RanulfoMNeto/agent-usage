@@ -2,12 +2,13 @@
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from .config import load_config
-from .subscriptions import capture_claude
+from usage.config import load_config
+from usage.subscriptions import capture_claude
 
 
 def main():
@@ -15,7 +16,15 @@ def main():
     parser.add_argument("--config", type=Path, help="Override per-user configuration")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
+        "--demo", action="store_true", help="Try fictional data in a temporary profile"
+    )
+    modes.add_argument(
         "--capture-claude", action="store_true", help="Capture native status-line JSON"
+    )
+    modes.add_argument(
+        "--claude-config",
+        action="store_true",
+        help="Print Claude status-line settings; no files are changed",
     )
     modes.add_argument(
         "--install-gnome",
@@ -29,9 +38,24 @@ def main():
     )
     args = parser.parse_args()
     try:
+        if args.claude_config:
+            from usage.integration import launch_command
+
+            command = shlex.join(
+                [str(Path(arg).as_posix()) for arg in launch_command()] + ["--capture-claude"]
+            )
+            print(json.dumps({"statusLine": {"type": "command", "command": command}}, indent=2))
+            return
+        if args.demo:
+            from usage.demo import profile
+            from usage.desktop import run
+
+            with profile() as (config, subscriptions):
+                run(config, subscriptions=subscriptions)
+            return
         config = load_config(args.config)
         if args.install_gnome or args.uninstall_gnome:
-            from .integration import install_gnome
+            from usage.integration import install_gnome
 
             print(install_gnome(args.config, remove=args.uninstall_gnome))
             return
@@ -45,7 +69,7 @@ def main():
                 )
             )
             return
-        from .desktop import run
+        from usage.desktop import run
 
         run(config)
     except (

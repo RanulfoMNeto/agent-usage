@@ -17,8 +17,12 @@ def command(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=15).stdout
 
 
+def launch_command():
+    return [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "usage"]
+
+
 def desktop_entry(config=None):
-    args = [sys.executable, "-m", "usage"]
+    args = launch_command()
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     quoted = []

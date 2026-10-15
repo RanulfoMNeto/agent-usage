@@ -87,7 +87,10 @@ class Bridge(QObject):
                 raise ValueError("Oversized request")
             args = json.loads(payload)
             if method == "preferences":
-                self.respond(identifier, json.loads(self.settings.value("appearance", "{}")))
+                values = json.loads(self.settings.value("appearance", "{}"))
+                if getattr(self.window, "config", {}).get("demo"):
+                    values["demo"] = True
+                self.respond(identifier, values)
                 return
             if method == "save_preferences":
                 if not isinstance(args, dict) or len(payload) > 4096:
@@ -236,6 +239,8 @@ class Widget(QWebEngineView):
         self.preferences = QSettings(
             str(user_directory("state") / "settings.ini"), QSettings.Format.IniFormat
         )
+        if config.get("demo"):
+            self.preferences.setValue("appearance", json.dumps({"period": "all"}))
         self.bridge = Bridge(usage, subscriptions, self.preferences, self)
         self.channel = QWebChannel(self.page())
         self.channel.registerObject("backend", self.bridge)
@@ -308,7 +313,7 @@ class Widget(QWebEngineView):
             )
 
 
-def run(config):
+def run(config, *, subscriptions=None):
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("Agent Usage")
     app.setDesktopFileName("agent-usage")
@@ -322,7 +327,9 @@ def run(config):
         QMessageBox.information(None, "Agent Usage", "The widget is already running.")
         return
     usage = Usage(config)
-    widget = Widget(config["widget"], usage, Subscriptions(config["subscriptions"]))
+    widget = Widget(
+        config["widget"], usage, subscriptions or Subscriptions(config["subscriptions"])
+    )
     usage.start()
     widget.show()
     try:

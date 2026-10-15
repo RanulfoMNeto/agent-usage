@@ -68,6 +68,8 @@ button, select { font: inherit; color: inherit; cursor: pointer; }
 .widget, dialog { min-height: var(--panel-height); padding: var(--panel-padding); }
 .panel-content { display: flow-root; }
 .widget { border: var(--stroke) solid var(--edge); border-radius: var(--radius); background: var(--shell); box-shadow: var(--shadow); }
+:root[data-demo='true'] .widget::after { content: 'Demo'; position: absolute; bottom: 3px; left: 0; right: 0; text-align: center; color: var(--muted); font-size: 8px; pointer-events: none; }
+:root[data-demo='true'] .source-settings, :root[data-demo='true'] .project-setting { display: none; }
 .header { cursor: grab; user-select: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .header-actions { display: flex; align-items: center; gap: 4px; }
 .icon-button { display: grid; place-items: center; width: 28px; height: 28px; padding: 5px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); }

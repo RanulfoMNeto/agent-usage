@@ -682,6 +682,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 native('preferences').then(saved => {
+  document.documentElement.dataset.demo = String(saved.demo === true);
   if (['system', 'dark', 'light'].includes(saved.theme)) preferences.theme = saved.theme;
   if (['today', 'weekly', 'all'].includes(saved.period)) preferences.period = saved.period;
   if (Number.isInteger(saved.limitAlert) && saved.limitAlert >= 0 && saved.limitAlert <= 100) preferences.limitAlert = saved.limitAlert;
