@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import shlex
 import subprocess
 import sys
@@ -72,6 +73,13 @@ def main():
             return
         from usage.desktop import run
 
+        if sys.platform == "win32" and getattr(sys, "frozen", False):
+            from usage.integration import install_windows_shortcut
+
+            try:
+                install_windows_shortcut(args.config)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                logging.warning("Could not create the Start menu shortcut.")
         run(config)
     except (
         OSError,
