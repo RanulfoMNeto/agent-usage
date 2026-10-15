@@ -1,0 +1,78 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+  package:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            executable: agent-usage
+            archive: dist/agent-usage-linux-*.tar.gz
+          - os: windows-latest
+            platform: windows-x86_64
+            executable: agent-usage.exe
+            archive: dist/agent-usage-windows-*.zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.11.6
+      - run: uv sync --locked --group build
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          uv run python -c "import os,tomllib; assert os.environ['RELEASE_TAG']=='v'+tomllib.load(open('pyproject.toml','rb'))['project']['version']"
+      - run: uv run --group build python scripts/package.py
+      - run: node tests/smoke.mjs dist/agent-usage/${{ matrix.executable }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+      - if: runner.os == 'Linux'
+        run: uv build
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python
+          path: |
+            dist/*.whl
+            dist/agent_usage_widget-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish tested packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd release
+          sha256sum *.zip *.whl *.tar.gz > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes --draft ./*
+          gh release edit "$RELEASE_TAG" --draft=false
