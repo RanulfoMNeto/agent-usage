@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -20,6 +21,72 @@ from usage.subscriptions import (
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_login_uses_native_flow_validates_urls_and_can_be_cancelled(self):
+        processes = []
+        create = asyncio.create_subprocess_exec
+
+        async def track(*args, **kwargs):
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "login.py"
+            script.write_text("""import json, sys, time
+def request(method, result):
+    query = json.loads(sys.stdin.readline())
+    assert query['method'] == method, query
+    print(json.dumps({'id': query['id'], 'result': result}), flush=True)
+request('initialize', {})
+assert json.loads(sys.stdin.readline())['method'] == 'initialized'
+request('account/read', {'account': None, 'requiresOpenaiAuth': True})
+url = 'https://auth.openai.com/oauth/authorize?state=PRIVATE'
+if sys.argv[1] == 'bad-url': url = 'https://example.com/steal'
+request('account/login/start', {'loginId': 'expected', 'authUrl': url})
+print(json.dumps({'method':'account/login/completed','params':{'loginId':'other','success':False}}), flush=True)
+if sys.argv[1] == 'cancel':
+    assert json.loads(sys.stdin.readline())['method'] == 'account/login/cancel'
+else:
+    print(json.dumps({'method':'account/login/completed','params':{'loginId':'expected','success':sys.argv[1] != 'reject'}}), flush=True)
+    request('account/read', {'account': {'type':'chatgpt','email':'PRIVATE'}})
+    request('account/rateLimits/read', {'rateLimits': {'primary': {'usedPercent': 12, 'windowDurationMins': 300, 'resetsAt': 2000000000}}})
+time.sleep(30)
+""")
+            with patch("usage.subscriptions.asyncio.create_subprocess_exec", side_effect=track):
+                opened = []
+                result = asyncio.run(
+                    read_codex([sys.executable, str(script), "ok"], 5, login=opened.append)
+                )
+                self.assertEqual(result["rateLimits"]["primary"]["usedPercent"], 12)
+                self.assertEqual(len(opened), 1)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                self.assertIsNotNone(processes[-1].returncode)
+                for mode, error, message in (
+                    ("bad-url", ValueError, "Invalid native login URL"),
+                    ("reject", CodexUnavailable, "login_cancelled"),
+                    ("cancel", CodexUnavailable, "login_cancelled"),
+                ):
+                    with self.subTest(mode=mode):
+                        cancelled = threading.Event()
+                        opened.clear()
+
+                        def open_browser(url):
+                            opened.append(url)
+                            if mode == "cancel":
+                                cancelled.set()
+
+                        with self.assertRaisesRegex(error, message):
+                            asyncio.run(
+                                read_codex(
+                                    [sys.executable, str(script), mode],
+                                    5,
+                                    login=open_browser,
+                                    cancelled=cancelled,
+                                )
+                            )
+                        self.assertEqual(len(opened), 0 if mode == "bad-url" else 1)
+                        self.assertIsNotNone(processes[-1].returncode)
+
     def test_default_command_finds_native_installations_without_changing_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -138,7 +205,10 @@ class SubscriptionTests(unittest.TestCase):
 
     def test_refresh_failure_expiry_and_staleness_are_honest(self):
         now = time.time()
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("usage.subscriptions.claude_status", return_value="claude_waiting"),
+        ):
             path = Path(directory) / "claude.json"
             path.write_text(
                 json.dumps(

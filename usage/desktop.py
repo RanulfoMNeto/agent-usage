@@ -20,7 +20,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QIcon, QScreen
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QScreen
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -33,9 +33,9 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from .config import user_directory
 from .history import MAX_IMPORT, Usage
-from .integration import gnome_call
+from .integration import gnome_call, install_claude_statusline
 from .readers import project_path
-from .subscriptions import Subscriptions
+from .subscriptions import Subscriptions, validate_login_url
 
 STATIC = Path(__file__).with_name("static").resolve()
 
@@ -57,6 +57,7 @@ class LocalPage(QWebEnginePage):
 class Bridge(QObject):
     reply = Signal(str, str)
     layout_changed = Signal(int, float, bool)
+    login_url = Signal(str)
 
     def __init__(self, usage, subscriptions, settings, window):
         super().__init__(window)
@@ -67,6 +68,19 @@ class Bridge(QObject):
             window,
         )
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-usage")
+        self.login_url.connect(self.open_login)
+
+    @Slot(str)
+    def open_login(self, url):
+        try:
+            url = validate_login_url(url)
+            if not getattr(self.window, "config", {}).get("demo") and QDesktopServices.openUrl(
+                QUrl(url)
+            ):
+                return
+        except ValueError:
+            pass
+        self.subscriptions.cancel_login()
 
     def respond(self, identifier, value):
         self.reply.emit(identifier, json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -86,6 +100,34 @@ class Bridge(QObject):
             if len(payload) > 16384:
                 raise ValueError("Oversized request")
             args = json.loads(payload)
+            if method in ("connect", "cancel_login"):
+                if getattr(self.window, "config", {}).get("demo"):
+                    raise ValueError("Connections are disabled in the demo")
+                if args not in ("codex", "claude"):
+                    raise ValueError("Unknown connection")
+                if method == "cancel_login":
+                    self.subscriptions.cancel_login()
+                    self.respond(identifier, {})
+                    return
+                if args == "claude":
+                    config = self.subscriptions.config_path
+                    issue = install_claude_statusline(config)
+                    if issue == "claude_custom_statusline":
+                        answer = QMessageBox.question(
+                            self.window,
+                            "Claude terminal capture",
+                            "Replace your current Claude terminal status line with Agent Usage?\n\n"
+                            "A backup will be kept. Limits require Claude terminal use; "
+                            "the VS Code chat panel alone does not supply them.",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if answer != QMessageBox.StandardButton.Yes:
+                            self.respond(identifier, {"cancelled": True})
+                            return
+                        issue = install_claude_statusline(config, replace=True)
+                    self.respond(identifier, {"issue": issue})
+                    return
             if method == "preferences":
                 values = json.loads(self.settings.value("appearance", "{}"))
                 if getattr(self.window, "config", {}).get("demo"):
@@ -166,6 +208,8 @@ class Bridge(QObject):
             self.respond(identifier, {"error": "Could not update settings."})
 
     def execute(self, method, args):
+        if method == "connect" and args == "codex":
+            return self.subscriptions.connect_codex(self.login_url.emit)
         if method == "usage":
             return self.usage.snapshot()
         if method == "subscriptions":
@@ -202,6 +246,8 @@ class Bridge(QObject):
         raise ValueError("Unknown operation")
 
     def close(self):
+        if isinstance(self.subscriptions, Subscriptions):
+            self.subscriptions.cancel_login(close=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
 
 

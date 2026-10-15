@@ -7,7 +7,6 @@ compact_width = 300
 
 [integrations]
 windows_shortcut = true
-claude_statusline = true
 
 [transcripts]
 codex = "~/.codex"

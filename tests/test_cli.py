@@ -10,7 +10,7 @@ from unittest.mock import patch
 from usage.__main__ import main
 from usage.demo import profile
 from usage.history import Usage
-from usage.integration import launch_command
+from usage.integration import claude_command, launch_command
 
 
 class CLITests(unittest.TestCase):
@@ -52,18 +52,12 @@ class CLITests(unittest.TestCase):
             override.write_text(
                 "[subscriptions]\nclaude_file = " + json.dumps(custom_capture.as_posix()) + "\n"
             )
-            for options, capture in (
-                ([], Path(config["subscriptions"]["claude_file"])),
-                (["--config", str(override)], custom_capture),
+            for override_path, capture in (
+                (None, Path(config["subscriptions"]["claude_file"])),
+                (override, custom_capture),
             ):
-                with self.subTest(options=options):
-                    process = subprocess.run(
-                        [sys.executable, "-m", "usage", "--claude-config", *options],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                    command = shlex.split(json.loads(process.stdout)["statusLine"]["command"])
+                with self.subTest(config=override_path):
+                    command = shlex.split(claude_command(override_path))
                     result = subprocess.run(
                         command,
                         cwd=root,
@@ -88,7 +82,7 @@ class CLITests(unittest.TestCase):
         with patch.object(sys, "frozen", True, create=True):
             self.assertEqual(launch_command(), [sys.executable])
 
-    def test_normal_launch_installs_integrations_and_optional_modes_do_not(self):
+    def test_launch_registers_shortcut_but_never_configures_agents(self):
         with profile() as (config, _):
             with (
                 patch("usage.__main__.load_config", return_value=config),
@@ -103,23 +97,18 @@ class CLITests(unittest.TestCase):
             ):
                 main()
                 shortcut.assert_called_once_with(None)
-                claude.assert_called_once_with(None)
-                self.assertEqual(
-                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_waiting"
-                )
+                claude.assert_not_called()
+                self.assertIsNone(run.call_args.kwargs["subscriptions"].config_path)
                 shortcut.reset_mock()
                 claude.reset_mock()
                 with patch.object(sys, "argv", ["agent-usage", "--demo"]):
                     main()
                 shortcut.assert_not_called()
                 claude.assert_not_called()
-                config["integrations"] = {"windows_shortcut": False, "claude_statusline": False}
+                config["integrations"] = {"windows_shortcut": False}
                 main()
                 shortcut.assert_not_called()
                 claude.assert_not_called()
-                self.assertEqual(
-                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_setup_disabled"
-                )
 
     def test_setup_failure_does_not_prevent_widget_startup(self):
         with profile() as (config, _):
@@ -133,7 +122,5 @@ class CLITests(unittest.TestCase):
                 self.assertLogs(level="WARNING") as logs,
             ):
                 main()
-                self.assertEqual(
-                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_setup_failed"
-                )
-                self.assertEqual(len(logs.output), 2)
+                run.assert_called_once()
+                self.assertEqual(len(logs.output), 1)

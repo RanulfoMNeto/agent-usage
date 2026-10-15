@@ -18,14 +18,7 @@ def main():
     modes.add_argument(
         "--demo", action="store_true", help="Try fictional data in a temporary profile"
     )
-    modes.add_argument(
-        "--capture-claude", action="store_true", help="Capture native status-line JSON"
-    )
-    modes.add_argument(
-        "--claude-config",
-        action="store_true",
-        help="Print Claude status-line settings; no files are changed",
-    )
+    modes.add_argument("--capture-claude", action="store_true", help=argparse.SUPPRESS)
     modes.add_argument(
         "--install-gnome",
         action="store_true",
@@ -38,12 +31,6 @@ def main():
     )
     args = parser.parse_args()
     try:
-        if args.claude_config:
-            from usage.integration import claude_command
-
-            command = claude_command(args.config)
-            print(json.dumps({"statusLine": {"type": "command", "command": command}}, indent=2))
-            return
         if args.demo:
             from usage.demo import profile
             from usage.desktop import run
@@ -76,17 +63,9 @@ def main():
                 install_windows_shortcut(args.config)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 logging.warning("Could not create the Start menu shortcut.")
-        from usage.integration import install_claude_statusline
         from usage.subscriptions import Subscriptions
 
-        claude_issue = "claude_setup_disabled"
-        if config["integrations"]["claude_statusline"]:
-            try:
-                claude_issue = install_claude_statusline(args.config)
-            except (OSError, ValueError):
-                claude_issue = "claude_setup_failed"
-                logging.warning("Could not configure Claude's status line. Settings are unchanged.")
-        run(config, subscriptions=Subscriptions(config["subscriptions"], claude_issue=claude_issue))
+        run(config, subscriptions=Subscriptions(config["subscriptions"], config_path=args.config))
     except (
         OSError,
         ValueError,

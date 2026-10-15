@@ -11,6 +11,7 @@ from unittest.mock import patch
 from usage.integration import (
     UUID,
     claude_command,
+    claude_status,
     install_claude_statusline,
     install_gnome,
     install_windows_shortcut,
@@ -20,6 +21,38 @@ from usage.integration import (
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_legacy_capture_is_repaired_only_on_request(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            legacy = 'cd "/old widget" && /old/widget/python -m usage --capture-claude'
+            path.write_text(json.dumps({"statusLine": {"type": "command", "command": legacy}}))
+            original = path.read_bytes()
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                self.assertTrue(owns_claude_command(legacy))
+                self.assertFalse(owns_claude_command(legacy + " | custom"))
+                self.assertEqual(claude_status(), "claude_setup_required")
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(install_claude_statusline(), "claude_waiting")
+                self.assertEqual(claude_status(), "claude_waiting")
+                self.assertEqual(
+                    path.with_name(path.name + ".agent-usage.bak").read_bytes(), original
+                )
+
+    def test_custom_replacement_preserves_current_settings_and_previous_backups(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            backup = path.with_name(path.name + ".agent-usage.bak")
+            backup.write_bytes(b"previous backup")
+            original = b'{"theme":"dark","statusLine":{"type":"command","command":"custom"}}'
+            path.write_bytes(original)
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                self.assertEqual(install_claude_statusline(), "claude_custom_statusline")
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(install_claude_statusline(replace=True), "claude_waiting")
+                self.assertEqual(json.loads(path.read_text())["theme"], "dark")
+                self.assertEqual(backup.read_bytes(), b"previous backup")
+                self.assertIn(original, [file.read_bytes() for file in path.parent.glob("*.bak")])
+
     @unittest.skipUnless(sys.platform == "win32", "Windows shortcuts require the native shell")
     def test_start_menu_shortcut_preserves_arguments_and_updates_after_moving(self):
         with tempfile.TemporaryDirectory() as folder:
