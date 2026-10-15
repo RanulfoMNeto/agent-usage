@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title description">
+  <title id="title">Agent Usage</title>
+  <desc id="description">A local desktop widget for Codex and Claude Code usage, limits and resets. Linux and Windows.</desc>
+  <rect width="1280" height="320" rx="24" fill="#111315"/>
+  <rect x="1" y="1" width="1278" height="318" rx="23" fill="none" stroke="#2c3335"/>
+  <g transform="translate(58 64) scale(3)">
+    <circle cx="12" cy="12" r="9" fill="#18231f" stroke="#a8c8bb" stroke-width="1.5"/>
+    <path d="M7.5 14v-3M12 16V8M16.5 14v-3" fill="none" stroke="#d6ece1" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <text x="152" y="115" fill="#f2f4f3" font-size="56" font-weight="650" letter-spacing="-2">Agent Usage</text>
+    <text x="64" y="186" fill="#c7cece" font-size="27">Your agent usage, limits and resets.</text>
+    <text x="64" y="225" fill="#c7cece" font-size="27">Right on your desktop.</text>
+    <text x="64" y="279" fill="#8f999b" font-size="16">LOCAL HISTORY</text>
+    <circle cx="216" cy="273" r="2" fill="#596466"/>
+    <text x="234" y="279" fill="#8f999b" font-size="16">LINUX + WINDOWS</text>
+    <path d="M886 68v184" stroke="#2c3335"/>
+    <circle cx="943" cy="115" r="6" fill="#8cc7be"/>
+    <text x="965" y="123" fill="#edf0ef" font-size="25">Codex</text>
+    <circle cx="943" cy="175" r="6" fill="#d97757"/>
+    <text x="965" y="183" fill="#edf0ef" font-size="25">Claude Code</text>
+    <text x="937" y="235" fill="#8f999b" font-size="16">One local widget.</text>
+  </g>
+</svg>

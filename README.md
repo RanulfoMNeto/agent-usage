@@ -1,31 +1,8 @@
-# Agent Usage
+![Agent Usage — your agent usage, limits and resets, right on your desktop](.github/assets/header.svg)
 
-**Your Codex and Claude Code usage, limits, and resets — on your desktop.**
-
-A local widget for Linux and Windows. Read native session history, check subscription
-availability, and inspect activity by day or project. No browser, account with us,
-API key, or external collector.
-
-![Agent Usage in History and Compact views, showing fictional Codex and Claude usage](.github/assets/preview.png)
-
-*The preview uses fictional data. Try the same interface with `agent-usage --demo`.*
-
-<details>
-<summary>History, Weekly and Day — up close</summary>
-
-**History** — activity across days; select a cell to inspect that day.
-
-<img src=".github/assets/history.png" width="420" alt="History heatmap with recorded daily token activity">
-
-**Weekly** — the current subscription reset window.
-
-<img src=".github/assets/weekly.png" width="420" alt="Weekly activity within the current subscription window">
-
-**Day** — the selected day's prompts, tokens and available cost estimates.
-
-<img src=".github/assets/day.png" width="420" alt="Selected day with its line chart and usage totals">
-
-</details>
+A local desktop widget for **Codex and Claude Code** on Linux and Windows.
+Read native session history, check subscription availability, and inspect activity
+by day or project. No API key, browser, or external collector.
 
 ## Get started
 
@@ -50,14 +27,25 @@ An existing agent installation is needed for real data. To try the widget first:
 uv run --locked --no-dev agent-usage --demo
 ```
 
-Demo mode creates six months of fictional native sessions in a temporary profile, makes no
-account queries, and removes its profile on normal exit. It does not require
-Codex or Claude Code. Close it to return to your real profile.
+Demo mode creates six months of fictional native sessions in a temporary profile.
+It makes no account queries and removes its profile on normal exit. It does not
+require Codex or Claude Code. Close it to return to your real profile.
 
 Drag the header to move the widget. **Compact** shows limits; **Normal** adds
 activity. Click a day in **Weekly** or **History** to inspect its chart and totals.
 Hover previews; clicking selects. Settings controls appearance, warnings, projects
 and sources. The close button quits the app.
+
+## See it in action
+
+<p align="center">
+  <img src=".github/assets/preview.png" width="400" alt="The complete Agent Usage widget in History view, with both agents and a selected day's line chart">
+</p>
+
+![History shows daily intensity, Weekly follows the current reset window, and Day shows prompt-level tokens and totals. Captured from the widget using fictional data.](.github/assets/activity.png)
+
+*Real widget captures with fictional demo data. The demo starts in History;
+Compact view shows subscription limits only.*
 
 ## Connect your agents
 
@@ -92,6 +80,7 @@ uv run --locked --no-dev agent-usage --claude-config
 For a portable build, run `./agent-usage --claude-config` on Linux or
 `.\agent-usage.exe --claude-config` in Windows PowerShell from its extracted folder.
 The command prints JSON with the correct executable path; it changes no files.
+If you use `--config PATH`, include it when generating this command too.
 
 Merge the printed `statusLine` field into `~/.claude/settings.json` (`~` is your
 home directory; respect `CLAUDE_CONFIG_DIR` when set). Keep your other settings.
@@ -165,8 +154,9 @@ agent files remain unchanged and will be collected again if the widget is restar
 | macOS, other GNOME versions | Not currently supported by the desktop integration |
 
 CI runs the tests on Linux and Windows, at both ends of the supported Python
-range. Release builds also exercise the actual executable and renderer in an
-isolated demo. This does not cover every display driver, desktop or agent version.
+range. Release builds extract the distribution archive and exercise its executable
+and renderer in an isolated demo. This does not cover every display driver,
+desktop or agent version.
 Glass is translucent; it does not supply operating-system wallpaper blur.
 
 <details>
@@ -207,7 +197,9 @@ if you want to erase the archive.
 
 The Python package is `usage`; the application command is `agent-usage`.
 Qt WebChannel connects the bundled UI directly to the collector. The same
-components power the live widget, demo and packaged builds.
+readers, SQLite archive, calculations and renderer power the live widget, demo
+and packaged builds. Python’s standard library handles collection and storage;
+Qt provides the desktop window, rendering and native dialogs.
 
 ```sh
 uv sync --locked
