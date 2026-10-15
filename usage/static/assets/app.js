@@ -486,7 +486,8 @@ function quotaCard(provider, item, multipleBuckets) {
 
 function renderSubscriptions() {
   const visible = activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter);
-  const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent)) : [];
+  const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent))
+    .map(agent => providers.find(p => p.agent === agent) || { agent }) : [];
   const signature = JSON.stringify([visible, missing, preferences.limitAlert, Math.floor(Date.now() / 60000)]);
   const hasLimits = activeProviders().length > 0;
   $('limit-setting').hidden = !hasLimits;
@@ -497,10 +498,18 @@ function renderSubscriptions() {
     const multipleBuckets = new Set(provider.windows.map(item => item.name)).size > 1;
     return provider.windows.map(item => quotaCard(provider, item, multipleBuckets));
   }));
-  for (const agent of missing) {
+  for (const provider of missing) {
+    const { agent } = provider;
+    const [label, hint] = {
+      not_found: ['Codex not found', 'Install the Codex CLI or its official VS Code extension.'],
+      login_required: ['Sign in required', 'Sign in to Codex with ChatGPT in this Windows or Linux environment.'],
+      unsupported_account: ['ChatGPT login required', 'This account does not provide ChatGPT subscription limits.'],
+      timeout: ['Connection timed out', 'The account query timed out. Retrying automatically.'],
+      query_failed: ['Limits unavailable', 'The native account query failed. Retrying automatically.'],
+    }[provider.issue] || ['Limits unavailable', 'No current account limits were reported.'];
     const row = el('div', undefined, 'quota-unavailable');
-    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), el('span', 'Limits unavailable', 'caption'));
-    row.title = 'Local activity is available. No current account limits were reported.';
+    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), el('span', label, 'caption'));
+    row.title = hint;
     $('subscriptions').append(row);
   }
   $('subscriptions').dataset.cards = $('subscriptions').querySelectorAll('.quota-card').length;

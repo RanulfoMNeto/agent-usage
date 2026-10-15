@@ -55,20 +55,26 @@ Activity is discovered automatically; subscription limits have separate requirem
 | Data | Codex | Claude Code |
 | --- | --- | --- |
 | Local activity | Native session files | Native project session files |
-| Subscription limits | Installed `codex` CLI with an existing ChatGPT login | Terminal status-line integration below |
-| VS Code | Activity when the extension writes native session files; limits use the CLI | Activity when native session files exist; the extension alone does not supply limits |
+| Subscription limits | Automatically detected Codex executable with an existing ChatGPT login | Terminal status-line integration below |
+| VS Code | Native session files and the extension's bundled Codex executable | Activity when native session files exist; the extension alone does not supply limits |
 
 ### Codex
 
-Install and sign in to the [Codex CLI](https://learn.chatgpt.com/docs/codex/cli).
-Make sure `codex` is available on the widget's `PATH`. The widget uses the documented
-[`account/rateLimits/read`](https://learn.chatgpt.com/docs/app-server) operation.
-It does not read or store your login tokens. API-key accounts may not provide
-ChatGPT subscription limits.
+Sign in to Codex through its official IDE extension or
+[CLI](https://learn.chatgpt.com/docs/cli). The widget automatically finds Codex on
+`PATH`, in its standard standalone installation, or bundled with VS Code,
+VS Code Insiders, or Cursor. It reuses the existing login in that environment;
+no separate CLI installation is needed when the extension's executable is found.
 
-If a desktop launch cannot find the executable, set its absolute path in the
-[configuration](#configuration). On Windows, use the native executable rather than
-a shell alias. WSL sessions and credentials belong to a separate environment.
+Limits use the documented [`account/read` and `account/rateLimits/read`](https://learn.chatgpt.com/docs/app-server)
+operations. The widget does not read or store login tokens. Missing executables,
+missing logins, unsupported account types, and connection failures have distinct
+status messages. Queries retry automatically; API-key accounts do not supply
+ChatGPT subscription limits. WSL and Windows use separate environments.
+
+For a custom installation, set `codex_command` in the [configuration](#configuration).
+An explicit command takes precedence over detection. On Windows, use the native
+`.exe` rather than a PowerShell alias or npm script.
 
 ### Claude Code
 
