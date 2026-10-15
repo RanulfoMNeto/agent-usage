@@ -1,0 +1,20 @@
+name: Bug report
+description: Report incorrect data or widget behavior.
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach raw conversations, credentials, or unredacted history exports.
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Widget version, operating system, desktop, and agent version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include what you expected and what happened. Redacted screenshots help.
+    validations:
+      required: true
