@@ -11,9 +11,9 @@ by day or project. No API key, browser, or external collector.
 folder**, and open `agent-usage` on Linux or `agent-usage.exe` on Windows. Python
 and Qt are included. Keep the `_internal` directory beside the executable.
 
-On Windows, double-click `agent-usage.exe` once to add **Agent Usage** to the
-Start menu. After moving the folder, open the executable again to update the
-shortcut. No terminal or administrator access is needed.
+On Windows, the first normal launch adds **Agent Usage** to the Start menu and
+Windows Search. This works with the portable app and the source command below.
+Subsequent launches from the shortcut need no terminal or administrator access.
 
 **From source:** install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and Git, then run:
@@ -25,6 +25,9 @@ uv run --locked --no-dev agent-usage
 ```
 
 Python 3.12–3.14 is supported; uv can supply it. A desktop session is required.
+`uv run` runs the source; it does not build a portable `.exe`. Keep the checkout
+and its `.venv` for the source shortcut, or the extracted folder for the portable
+app. After moving an installation, launch it once again to refresh the shortcut.
 An existing agent installation is needed for real data. To try the widget first:
 
 ```sh

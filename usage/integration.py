@@ -18,7 +18,13 @@ def command(*args):
 
 
 def launch_command(config=None):
-    args = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "usage"]
+    executable = Path(sys.executable)
+    # A Start-menu launch uses pythonw; status-line capture still needs standard I/O.
+    if executable.name.lower() == "pythonw.exe" and not getattr(sys, "frozen", False):
+        executable = executable.with_name("python.exe")
+    args = [str(executable)]
+    if not getattr(sys, "frozen", False):
+        args.extend(["-I", "-m", "usage"])
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     return args
@@ -38,6 +44,10 @@ def install_windows_shortcut(config=None):
     shortcut = Path(directory) / "Agent Usage.lnk"
     shortcut.parent.mkdir(parents=True, exist_ok=True)
     args = launch_command(config)
+    if not getattr(sys, "frozen", False):
+        windowed = Path(args[0]).with_name("pythonw.exe")
+        if windowed.is_file():
+            args[0] = str(windowed)
     entry = dict(path=str(shortcut), target=args[0], arguments=subprocess.list2cmdline(args[1:]))
     powershell = (
         Path(os.environ.get("SystemRoot", r"C:\Windows"))
