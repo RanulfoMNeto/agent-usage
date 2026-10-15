@@ -383,13 +383,17 @@ class DesktopTests(unittest.TestCase):
                     1,
                 )
                 # Diagnostics must update even when the same agent still has no quota windows.
-                for issue, label in (
-                    ("not_found", "Codex not found"),
-                    ("login_required", "Sign in required"),
-                    ("unsupported_account", "ChatGPT login required"),
+                for agent, issue, label in (
+                    ("Codex", "not_found", "Codex not found"),
+                    ("Codex", "login_required", "Sign in required"),
+                    ("Codex", "unsupported_account", "ChatGPT login required"),
+                    ("Claude Code", "claude_waiting", "Waiting for Claude CLI"),
+                    ("Claude Code", "claude_no_limits", "No limits reported"),
+                    ("Claude Code", "claude_custom_statusline", "Custom status line"),
+                    ("Claude Code", "claude_setup_failed", "Setup unavailable"),
                 ):
                     window.page().runJavaScript(
-                        f"providers=[{{agent:'Codex',windows:[],issue:'{issue}'}}];render()"
+                        f"providers=[{{agent:'{agent}',windows:[],issue:'{issue}'}}];render()"
                     )
                     wait_for(
                         "[...document.querySelectorAll('.quota-unavailable .caption')]"

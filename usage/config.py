@@ -27,6 +27,8 @@ def load_config(path=None):
         for section, values in tomllib.loads(path.read_text(encoding="utf-8")).items():
             config.setdefault(section, {}).update(values)
     subscriptions = config["subscriptions"]
+    if any(type(value) is not bool for value in config["integrations"].values()):
+        raise ValueError("Integration settings must be booleans")
     if not 1 <= config["collection"]["refresh_seconds"] <= 300:
         raise ValueError("Invalid collection interval")
     if not 10 <= subscriptions["refresh_seconds"] <= subscriptions["stale_seconds"]:

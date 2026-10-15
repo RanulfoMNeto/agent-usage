@@ -8,7 +8,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from usage.integration import UUID, install_gnome, install_windows_shortcut, launch_command
+from usage.integration import (
+    UUID,
+    claude_command,
+    install_claude_statusline,
+    install_gnome,
+    install_windows_shortcut,
+    launch_command,
+    owns_claude_command,
+)
 
 
 class IntegrationTests(unittest.TestCase):
@@ -62,6 +70,153 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(Path(actual["TargetPath"]), moved)
                 self.assertEqual(actual["Arguments"], "")
 
+    def test_claude_setup_preserves_settings_and_updates_only_its_own_command(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            original = b'{"permissions": {"deny": ["Read(.env)"]}, "theme": "dark"}\n'
+            path.write_bytes(original)
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                self.assertEqual(install_claude_statusline(), "claude_waiting")
+                settings = json.loads(path.read_text())
+                self.assertEqual(settings["permissions"], {"deny": ["Read(.env)"]})
+                self.assertEqual(settings["theme"], "dark")
+                self.assertEqual(settings["statusLine"]["command"], claude_command())
+                self.assertEqual(
+                    path.with_name(path.name + ".agent-usage.bak").read_bytes(), original
+                )
+                modified = path.stat().st_mtime_ns
+                install_claude_statusline()
+                self.assertEqual(path.stat().st_mtime_ns, modified)
+                override = Path(folder) / "custom config.toml"
+                install_claude_statusline(override)
+                self.assertEqual(
+                    json.loads(path.read_text())["statusLine"]["command"], claude_command(override)
+                )
+                self.assertEqual(
+                    path.with_name(path.name + ".agent-usage.bak").read_bytes(), original
+                )
+
+    def test_claude_setup_leaves_custom_invalid_and_missing_profiles_unchanged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(path.parent / "missing")}):
+                self.assertEqual(install_claude_statusline(), "claude_not_found")
+                self.assertFalse(path.parent.joinpath("missing").exists())
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                for original in (
+                    b'{"statusLine":{"type":"command","command":"my-status --verbose"}}',
+                    b'{"statusLine":false}',
+                    b'{"statusLine":{"type":"command","command":""}}',
+                ):
+                    path.write_bytes(original)
+                    self.assertEqual(install_claude_statusline(), "claude_custom_statusline")
+                    self.assertEqual(path.read_bytes(), original)
+                for original in (b'{"statusLine":', b"[]", b"\xff"):
+                    path.write_bytes(original)
+                    with self.assertRaises(ValueError):
+                        install_claude_statusline()
+                    self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(path.with_name(path.name + ".agent-usage.bak").exists())
+                path.unlink()
+                self.assertEqual(install_claude_statusline(), "claude_waiting")
+                self.assertEqual(
+                    json.loads(path.read_text())["statusLine"]["command"], claude_command()
+                )
+
+    def test_claude_setup_failure_and_concurrent_edit_preserve_original(self):
+        from PySide6.QtCore import QLockFile, QSaveFile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            original = b'{"theme":"dark"}\n'
+            path.write_bytes(original)
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                lock = QLockFile(str(path) + ".agent-usage.lock")
+                self.assertTrue(lock.tryLock(0))
+                try:
+                    with self.assertRaises(OSError):
+                        install_claude_statusline()
+                finally:
+                    lock.unlock()
+                self.assertEqual(path.read_bytes(), original)
+                with patch("PySide6.QtCore.QSaveFile.commit", return_value=False):
+                    with self.assertRaises(OSError):
+                        install_claude_statusline()
+                self.assertEqual(path.read_bytes(), original)
+                open_file = QSaveFile.open
+                changed = b'{"theme":"light"}\n'
+
+                def edit_before_save(output, mode):
+                    path.write_bytes(changed)
+                    return open_file(output, mode)
+
+                with patch("PySide6.QtCore.QSaveFile.open", new=edit_before_save):
+                    with self.assertRaises(OSError):
+                        install_claude_statusline()
+                self.assertEqual(path.read_bytes(), changed)
+
+    @unittest.skipUnless(sys.platform == "win32", "Exercise native Windows command shells")
+    def test_windows_capture_preserves_shell_metacharacters_and_standard_input(self):
+        from usage.demo import profile
+
+        with profile() as (config, _):
+            root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+            override = root / "O'Brien $profile & config.toml"
+            override.write_text("", encoding="utf-8")
+            capture = Path(config["subscriptions"]["claude_file"])
+            shells = [["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]]
+            import shutil
+
+            bash = shutil.which("bash")
+            if bash:
+                shells.append([bash, "-c"])
+            for shell in shells:
+                with self.subTest(shell=shell):
+                    result = subprocess.run(
+                        [*shell, claude_command(override)],
+                        input=json.dumps(
+                            {
+                                "rate_limits": {
+                                    "seven_day": {"used_percentage": 42, "resets_at": 2000000000}
+                                }
+                            }
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=True,
+                    )
+                    self.assertIn("42%", result.stdout)
+                    self.assertEqual(
+                        json.loads(capture.read_text())["windows"][0]["used_percent"], 42
+                    )
+                    capture.unlink()
+
+    def test_generated_and_legacy_commands_are_recognized_without_matching_custom_scripts(self):
+        for platform in ("linux", "win32"):
+            with patch("sys.platform", platform):
+                self.assertTrue(owns_claude_command(claude_command()))
+        self.assertTrue(owns_claude_command("C:/Python/python.exe -m usage --capture-claude"))
+        self.assertTrue(
+            owns_claude_command(
+                "'/old install/agent-usage' --config '/old path/config' --capture-claude"
+            )
+        )
+        for command in (
+            None,
+            "",
+            "echo --capture-claude",
+            "agent-usage --capture-claude | my-status",
+            "python -m usage --capture-claude; other",
+            "'unterminated",
+            "powershell.exe -NoProfile -NonInteractive -EncodedCommand invalid",
+        ):
+            self.assertFalse(owns_claude_command(command))
+
+    def test_windowed_python_uses_console_python_for_capture(self):
+        with patch("sys.executable", str(Path("venv") / "pythonw.exe")):
+            self.assertEqual(Path(launch_command()[0]).name, "python.exe")
+
     def test_install_reinstall_remove_preserve_other_extensions_and_history(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -107,7 +262,3 @@ class IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 install_gnome()
             command.assert_called_once_with("gnome-shell", "--version")
-
-    def test_windowed_python_uses_console_python_for_capture(self):
-        with patch("sys.executable", str(Path("venv") / "pythonw.exe")):
-            self.assertEqual(Path(launch_command()[0]).name, "python.exe")

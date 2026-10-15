@@ -172,8 +172,9 @@ def capture_claude(path, payload):
 
 
 class Subscriptions:
-    def __init__(self, config):
+    def __init__(self, config, *, claude_issue="claude_waiting"):
         self.config = config
+        self.claude_issue = claude_issue
         self.lock = threading.Lock()
         self.checked = None
         self.codex = None
@@ -243,6 +244,13 @@ class Subscriptions:
                     windows=[],
                 )
             now = time.time()
+            claude["issue"] = (
+                "claude_no_limits"
+                if self.claude_issue == "claude_waiting"
+                and claude["updated_at"] is not None
+                and not claude["windows"]
+                else self.claude_issue
+            )
             providers = []
             for provider in (self.codex, claude):
                 result = dict(provider)

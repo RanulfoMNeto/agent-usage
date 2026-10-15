@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from usage.__main__ import main
 from usage.demo import profile
 from usage.history import Usage
 from usage.integration import launch_command
@@ -86,3 +87,53 @@ class CLITests(unittest.TestCase):
     def test_packaged_launcher_does_not_invoke_python_module(self):
         with patch.object(sys, "frozen", True, create=True):
             self.assertEqual(launch_command(), [sys.executable])
+
+    def test_normal_launch_installs_integrations_and_optional_modes_do_not(self):
+        with profile() as (config, _):
+            with (
+                patch("usage.__main__.load_config", return_value=config),
+                patch("usage.desktop.run") as run,
+                patch("usage.integration.install_windows_shortcut") as shortcut,
+                patch(
+                    "usage.integration.install_claude_statusline", return_value="claude_waiting"
+                ) as claude,
+                patch("sys.platform", "win32"),
+                patch.object(sys, "frozen", False, create=True),
+                patch.object(sys, "argv", ["agent-usage"]),
+            ):
+                main()
+                shortcut.assert_called_once_with(None)
+                claude.assert_called_once_with(None)
+                self.assertEqual(
+                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_waiting"
+                )
+                shortcut.reset_mock()
+                claude.reset_mock()
+                with patch.object(sys, "argv", ["agent-usage", "--demo"]):
+                    main()
+                shortcut.assert_not_called()
+                claude.assert_not_called()
+                config["integrations"] = {"windows_shortcut": False, "claude_statusline": False}
+                main()
+                shortcut.assert_not_called()
+                claude.assert_not_called()
+                self.assertEqual(
+                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_setup_disabled"
+                )
+
+    def test_setup_failure_does_not_prevent_widget_startup(self):
+        with profile() as (config, _):
+            with (
+                patch("usage.__main__.load_config", return_value=config),
+                patch("usage.desktop.run") as run,
+                patch("usage.integration.install_windows_shortcut", side_effect=OSError),
+                patch("usage.integration.install_claude_statusline", side_effect=OSError),
+                patch("sys.platform", "win32"),
+                patch.object(sys, "argv", ["agent-usage"]),
+                self.assertLogs(level="WARNING") as logs,
+            ):
+                main()
+                self.assertEqual(
+                    run.call_args.kwargs["subscriptions"].claude_issue, "claude_setup_failed"
+                )
+                self.assertEqual(len(logs.output), 2)

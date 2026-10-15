@@ -62,7 +62,7 @@ Activity is discovered automatically; subscription limits have separate requirem
 | Data | Codex | Claude Code |
 | --- | --- | --- |
 | Local activity | Native session files | Native project session files |
-| Subscription limits | Automatically detected Codex executable with an existing ChatGPT login | Terminal status-line integration below |
+| Subscription limits | Automatically detected Codex executable with an existing ChatGPT login | Automatically configured terminal status line |
 | VS Code | Native session files and the extension's bundled Codex executable | Activity when native session files exist; the extension alone does not supply limits |
 
 ### Codex
@@ -85,7 +85,29 @@ An explicit command takes precedence over detection. On Windows, use the native
 
 ### Claude Code
 
-Generate settings for the installed widget:
+The widget connects Claude's terminal status line automatically on a normal
+launch when `~/.claude` exists (`CLAUDE_CONFIG_DIR` is respected). It adds only
+`statusLine` to `settings.json`, preserves other settings, and saves the original
+file once as `settings.json.agent-usage.bak`. Reopening is safe and updates our
+command when the widget installation moves. Demo and capture commands do not
+install integrations. No credentials are read or copied.
+
+Complete a request in **Claude Code terminal mode**, signed in to the subscription.
+Eligible accounts supply `rate_limits` after a response; each window can be absent.
+The widget retains only quota fields. The VS Code **chat panel alone does not
+provide these snapshots**. Closing or leaving the terminal inactive can leave an
+old reading, shown as outdated. Automatic setup does not remove this limitation.
+[Official status-line documentation](https://code.claude.com/docs/en/statusline).
+
+The widget explains when it is waiting for the CLI, cannot configure settings,
+or detects an existing custom status line. Malformed settings and custom commands
+are left unchanged. If you already use a status-line script, pass the same input
+JSON to the capture command below inside that script, preserving its output.
+
+<details>
+<summary>Existing custom status line or manual setup</summary>
+
+Print the capture command for this installation:
 
 ```sh
 uv run --locked --no-dev agent-usage --claude-config
@@ -96,16 +118,11 @@ For a portable build, run `./agent-usage --claude-config` on Linux or
 The command prints JSON with the correct executable path; it changes no files.
 If you use `--config PATH`, include it when generating this command too.
 
-Merge the printed `statusLine` field into `~/.claude/settings.json` (`~` is your
-home directory; respect `CLAUDE_CONFIG_DIR` when set). Keep your other settings.
-If you already use a status-line script, pass the same input JSON to the printed
-capture command inside that script, preserving its existing output.
+The Windows command supports Git Bash and PowerShell, including installation
+paths containing spaces. The capture uses the console Python even when the widget
+was opened through its windowed Start-menu launcher.
 
-Start a Claude Code terminal session and complete a request. Eligible subscription
-accounts supply `rate_limits` after an API response; each window can be absent.
-The widget retains only quota fields from this input. A closed or inactive
-terminal can leave an old snapshot, which is marked as stale.
-[Official status-line documentation](https://code.claude.com/docs/en/statusline).
+</details>
 
 ## Understand the data
 
@@ -200,6 +217,17 @@ file. No personal configuration belongs in the repository.
 [subscriptions]
 codex_command = ["/absolute/path/to/codex"]
 ```
+
+Automatic integrations can be disabled individually:
+
+```toml
+[integrations]
+windows_shortcut = false
+claude_statusline = false
+```
+
+Disabling setup stops future changes; it does not remove an existing shortcut or
+status line. Remove those entries separately when disconnecting the widget.
 
 To update, replace the portable app or pull the source and rerun the locked
 command. State stays outside the installation. To uninstall, remove the GNOME

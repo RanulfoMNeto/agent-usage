@@ -3,7 +3,6 @@
 import argparse
 import json
 import logging
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -40,12 +39,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.claude_config:
-            from usage.integration import launch_command
+            from usage.integration import claude_command
 
-            command = shlex.join(
-                [str(Path(arg).as_posix()) for arg in launch_command(args.config)]
-                + ["--capture-claude"]
-            )
+            command = claude_command(args.config)
             print(json.dumps({"statusLine": {"type": "command", "command": command}}, indent=2))
             return
         if args.demo:
@@ -73,14 +69,24 @@ def main():
             return
         from usage.desktop import run
 
-        if sys.platform == "win32":
+        if sys.platform == "win32" and config["integrations"]["windows_shortcut"]:
             from usage.integration import install_windows_shortcut
 
             try:
                 install_windows_shortcut(args.config)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 logging.warning("Could not create the Start menu shortcut.")
-        run(config)
+        from usage.integration import install_claude_statusline
+        from usage.subscriptions import Subscriptions
+
+        claude_issue = "claude_setup_disabled"
+        if config["integrations"]["claude_statusline"]:
+            try:
+                claude_issue = install_claude_statusline(args.config)
+            except (OSError, ValueError):
+                claude_issue = "claude_setup_failed"
+                logging.warning("Could not configure Claude's status line. Settings are unchanged.")
+        run(config, subscriptions=Subscriptions(config["subscriptions"], claude_issue=claude_issue))
     except (
         OSError,
         ValueError,
