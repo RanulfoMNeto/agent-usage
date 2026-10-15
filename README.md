@@ -11,6 +11,10 @@ by day or project. No API key, browser, or external collector.
 folder**, and open `agent-usage` on Linux or `agent-usage.exe` on Windows. Python
 and Qt are included. Keep the `_internal` directory beside the executable.
 
+On Windows, double-click `agent-usage.exe` once to add **Agent Usage** to the
+Start menu. After moving the folder, open the executable again to update the
+shortcut. No terminal or administrator access is needed.
+
 **From source:** install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and Git, then run:
 
@@ -197,8 +201,8 @@ codex_command = ["/absolute/path/to/codex"]
 To update, replace the portable app or pull the source and rerun the locked
 command. State stays outside the installation. To uninstall, remove the GNOME
 integration if enabled, remove the Claude capture command from its settings,
-and delete the application folder. Delete the state directory separately only
-if you want to erase the archive.
+and delete the application folder and Windows Start menu shortcut. Delete the
+state directory separately only if you want to erase the archive.
 
 ## Development and support
 

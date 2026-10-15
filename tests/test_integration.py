@@ -1,14 +1,61 @@
 import ast
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from usage.integration import UUID, install_gnome
+from usage.integration import UUID, install_gnome, install_windows_shortcut, launch_command
 
 
 class IntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcuts require the native shell")
+    def test_start_menu_shortcut_preserves_arguments_and_updates_after_moving(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "custom settings $(example).toml"
+            with patch("PySide6.QtCore.QStandardPaths.writableLocation", return_value=str(root)):
+                shortcut = install_windows_shortcut(config)
+                install_windows_shortcut(config)
+                self.assertEqual(list(root.glob("*.lnk")), [shortcut])
+                args = launch_command(config)
+                powershell = (
+                    Path(os.environ["SystemRoot"])
+                    / "System32/WindowsPowerShell/v1.0/powershell.exe"
+                )
+
+                def read_shortcut():
+                    result = subprocess.run(
+                        [
+                            str(powershell),
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            "$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AGENT_USAGE_TEST_LINK);"
+                            "$link | Select-Object TargetPath,Arguments,WorkingDirectory | ConvertTo-Json",
+                        ],
+                        env={**os.environ, "AGENT_USAGE_TEST_LINK": str(shortcut)},
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    return json.loads(result.stdout)
+
+                actual = read_shortcut()
+                self.assertEqual(Path(actual["TargetPath"]), Path(args[0]))
+                self.assertEqual(actual["Arguments"], subprocess.list2cmdline(args[1:]))
+                self.assertEqual(Path(actual["WorkingDirectory"]), Path(args[0]).parent)
+                moved = root / "new folder" / "agent-usage.exe"
+                with patch("usage.integration.launch_command", return_value=[str(moved)]):
+                    install_windows_shortcut()
+                actual = read_shortcut()
+                self.assertEqual(Path(actual["TargetPath"]), moved)
+                self.assertEqual(actual["Arguments"], "")
+
     def test_install_reinstall_remove_preserve_other_extensions_and_history(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

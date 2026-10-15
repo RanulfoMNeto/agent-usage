@@ -1,4 +1,4 @@
-"""Optional GNOME desktop integration using the existing widget and session bus."""
+"""Native desktop launchers and optional GNOME integration."""
 
 import ast
 import json
@@ -22,6 +22,52 @@ def launch_command(config=None):
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     return args
+
+
+def install_windows_shortcut(config=None):
+    """Register the current executable in the user's Start menu, without elevation."""
+    if sys.platform != "win32":
+        return None
+    from PySide6.QtCore import QStandardPaths
+
+    directory = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.ApplicationsLocation
+    )
+    if not directory:
+        raise OSError("Start menu unavailable")
+    shortcut = Path(directory) / "Agent Usage.lnk"
+    shortcut.parent.mkdir(parents=True, exist_ok=True)
+    args = launch_command(config)
+    entry = dict(path=str(shortcut), target=args[0], arguments=subprocess.list2cmdline(args[1:]))
+    powershell = (
+        Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    subprocess.run(
+        [
+            str(powershell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            """
+$ErrorActionPreference = 'Stop'
+$entry = $env:AGENT_USAGE_SHORTCUT | ConvertFrom-Json
+$link = (New-Object -ComObject WScript.Shell).CreateShortcut($entry.path)
+$link.TargetPath = $entry.target
+$link.Arguments = $entry.arguments
+$link.WorkingDirectory = Split-Path -LiteralPath $entry.target
+$link.Description = 'Agent Usage'
+$link.IconLocation = $entry.target + ',0'
+$link.Save()
+""",
+        ],
+        env={**os.environ, "AGENT_USAGE_SHORTCUT": json.dumps(entry)},
+        check=True,
+        capture_output=True,
+        timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return shortcut
 
 
 def desktop_entry(config=None):
