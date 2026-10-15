@@ -59,7 +59,7 @@ def main():
             return
         if args.capture_claude:
             snapshot = capture_claude(
-                config["subscriptions"]["claude_file"], json.loads(sys.stdin.read(65537))
+                config["subscriptions"]["claude_file"], json.loads(sys.stdin.buffer.read(65537))
             )
             print(
                 " · ".join(

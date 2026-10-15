@@ -37,7 +37,11 @@ def claude_command(config=None):
     args = [Path(arg).as_posix() for arg in launch_command(config)] + ["--capture-claude"]
     if sys.platform == "win32":
         quoted = " ".join("'" + arg.replace("'", "''") + "'" for arg in args)
-        script = "# Agent Usage status line\n$input | & " + quoted + "; exit $LASTEXITCODE"
+        script = (
+            "# Agent Usage status line\n"
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "[Console]::In.ReadToEnd() | & " + quoted + "; exit $LASTEXITCODE"
+        )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
     return shlex.join(args)
