@@ -46,6 +46,7 @@ class CLITests(unittest.TestCase):
         with profile() as (config, _):
             root = Path(os.environ["CODEX_HOME"]).parent
             override = root / "custom config.toml"
+            (root / "usage.py").write_text("raise RuntimeError('Project module must not run')\n")
             custom_capture = root / "custom limits.json"
             override.write_text(
                 "[subscriptions]\nclaude_file = " + json.dumps(custom_capture.as_posix()) + "\n"

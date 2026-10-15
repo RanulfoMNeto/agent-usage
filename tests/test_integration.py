@@ -46,11 +46,17 @@ class IntegrationTests(unittest.TestCase):
                     return json.loads(result.stdout)
 
                 actual = read_shortcut()
-                self.assertEqual(Path(actual["TargetPath"]), Path(args[0]))
+                windowed = Path(args[0]).with_name("pythonw.exe")
+                self.assertEqual(
+                    Path(actual["TargetPath"]), windowed if windowed.is_file() else Path(args[0])
+                )
                 self.assertEqual(actual["Arguments"], subprocess.list2cmdline(args[1:]))
                 self.assertEqual(Path(actual["WorkingDirectory"]), Path(args[0]).parent)
                 moved = root / "new folder" / "agent-usage.exe"
-                with patch("usage.integration.launch_command", return_value=[str(moved)]):
+                with (
+                    patch("usage.integration.launch_command", return_value=[str(moved)]),
+                    patch.object(sys, "frozen", True, create=True),
+                ):
                     install_windows_shortcut()
                 actual = read_shortcut()
                 self.assertEqual(Path(actual["TargetPath"]), moved)
@@ -101,3 +107,7 @@ class IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 install_gnome()
             command.assert_called_once_with("gnome-shell", "--version")
+
+    def test_windowed_python_uses_console_python_for_capture(self):
+        with patch("sys.executable", str(Path("venv") / "pythonw.exe")):
+            self.assertEqual(Path(launch_command()[0]).name, "python.exe")

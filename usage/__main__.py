@@ -73,7 +73,7 @@ def main():
             return
         from usage.desktop import run
 
-        if sys.platform == "win32" and getattr(sys, "frozen", False):
+        if sys.platform == "win32":
             from usage.integration import install_windows_shortcut
 
             try:
