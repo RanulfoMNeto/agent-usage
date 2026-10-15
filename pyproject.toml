@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-usage-widget"
-version = "0.1.1"
+version = "0.1.2"
 description = "A local desktop widget for Codex and Claude Code usage"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
