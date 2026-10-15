@@ -382,6 +382,19 @@ class DesktopTests(unittest.TestCase):
                     ),
                     1,
                 )
+                # Diagnostics must update even when the same agent still has no quota windows.
+                for issue, label in (
+                    ("not_found", "Codex not found"),
+                    ("login_required", "Sign in required"),
+                    ("unsupported_account", "ChatGPT login required"),
+                ):
+                    window.page().runJavaScript(
+                        f"providers=[{{agent:'Codex',windows:[],issue:'{issue}'}}];render()"
+                    )
+                    wait_for(
+                        "[...document.querySelectorAll('.quota-unavailable .caption')]"
+                        f".some(node=>node.textContent==='{label}')"
+                    )
         finally:
             window.close()
             window.bridge.close()

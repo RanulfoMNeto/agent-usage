@@ -3,13 +3,55 @@
 import asyncio
 import json
 import os
+import platform
+import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
 from .readers import number
+
+
+class CodexUnavailable(RuntimeError):
+    """A known account condition, without native error text or credentials."""
+
+
+def codex_command(command):
+    """Reuse a native installation when the default command is not on PATH."""
+    if command != ["codex"]:
+        return command
+    windows = sys.platform == "win32"
+    name = "codex.exe" if windows else "codex"
+    found = shutil.which(name)
+    # Do not auto-discover a program in the current project or Downloads directory.
+    if found and Path(found).is_absolute() and Path(found).parent != Path.cwd():
+        return [found]
+    home = Path.home()
+    installed = (
+        Path(os.environ.get("LOCALAPPDATA") or home / "AppData/Local") / "Programs/OpenAI/Codex/bin"
+        if windows
+        else home / ".local/bin"
+    )
+    candidates = [Path(os.environ.get("CODEX_INSTALL_DIR") or installed).expanduser() / name]
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    target = ("windows" if windows else "linux") + "-" + architecture
+    for editor in (".vscode", ".vscode-insiders", ".cursor"):
+        extensions = (home / editor / "extensions").glob("openai.chatgpt-*")
+        for extension in sorted(
+            extensions,
+            key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
+            reverse=True,
+        ):
+            candidates.append(extension / "bin" / target / name)
+    for candidate in candidates:
+        if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
+            return [str(candidate)]
+    raise FileNotFoundError("Codex executable unavailable")
 
 
 def window(name, minutes, used, resets):
@@ -57,7 +99,10 @@ def claude_snapshot(payload, now):
 async def read_codex(command, timeout):
     """Use the documented stdio handshake, query limits, and close the process."""
     process = await asyncio.create_subprocess_exec(
-        *[str(Path(arg).expanduser()) if arg.startswith("~") else arg for arg in command],
+        *[
+            str(Path(arg).expanduser()) if arg.startswith("~") else arg
+            for arg in codex_command(command)
+        ],
         "app-server",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -94,7 +139,12 @@ async def read_codex(command, timeout):
                 },
             )
             await send({"method": "initialized"})
-            return await request(2, "account/rateLimits/read", {})
+            account = await request(2, "account/read", {"refreshToken": False})
+            if account.get("account") is None and account.get("requiresOpenaiAuth"):
+                raise CodexUnavailable("login_required")
+            if (account.get("account") or {}).get("type") in ("apiKey", "amazonBedrock"):
+                raise CodexUnavailable("unsupported_account")
+            return await request(3, "account/rateLimits/read", {})
     finally:
         if process.returncode is None:
             process.terminate()
@@ -147,9 +197,22 @@ class Subscriptions:
                     KeyError,
                     TypeError,
                     AttributeError,
-                ):
+                ) as exc:
+                    issue = (
+                        str(exc)
+                        if isinstance(exc, CodexUnavailable)
+                        else "not_found"
+                        if isinstance(exc, FileNotFoundError)
+                        else "timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "query_failed"
+                    )
                     self.codex = dict(
-                        agent="Codex", source="Native account limits", updated_at=None, windows=[]
+                        agent="Codex",
+                        source="Native account limits",
+                        updated_at=None,
+                        windows=[],
+                        issue=issue,
                     )
                 self.checked = time.monotonic()
             try:
