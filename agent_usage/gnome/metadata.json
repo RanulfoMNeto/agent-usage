@@ -1,0 +1,8 @@
+{
+  "uuid": "agent-usage@agent-usage.local",
+  "name": "Agent Usage Desktop",
+  "description": "Place the Agent Usage window on the desktop, retaining its existing interface.",
+  "shell-version": ["50"],
+  "settings-schema": "org.gnome.shell.extensions.agent-usage",
+  "version": 1
+}
