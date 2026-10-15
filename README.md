@@ -93,7 +93,7 @@ Unknown measurements remain unknown. API estimates are not subscription charges.
 - **Codex:** uses the installed `codex` executable and its existing login via
   [`account/rateLimits/read`](https://learn.chatgpt.com/docs/app-server).
 - **Claude:** uses the native [status line](https://code.claude.com/docs/en/statusline).
-  Set its command to `"/absolute/path/to/python" -m agent_usage --capture-claude`
+  Set its command to `"/absolute/path/to/python" -m usage --capture-claude`
   using the Python environment where this package is installed. Preserve any
   existing status-line command. The VS Code extension alone does not supply
   quota data to this adapter.
@@ -103,7 +103,7 @@ percentage. Missing quotas remain unavailable, and old snapshots are marked.
 
 Optional overrides: `~/.config/agent-usage/config.toml` on Linux
 (`XDG_CONFIG_HOME` supported), `%LOCALAPPDATA%\AgentUsage\config.toml` on Windows,
-or `--config PATH`. See [defaults](agent_usage/defaults.toml). For example:
+or `--config PATH`. See [defaults](usage/defaults.toml). For example:
 
 ```toml
 [subscriptions]
@@ -117,8 +117,8 @@ uv sync --locked
 uv run ruff check .
 uv run ruff format --check .
 uv run python -m unittest discover -s tests -v
-node --check agent_usage/static/assets/app.js
-node --check agent_usage/gnome/extension.js
+node --check usage/static/assets/app.js
+node --check usage/gnome/extension.js
 uv build
 ```
 

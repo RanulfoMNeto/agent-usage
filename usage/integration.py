@@ -18,7 +18,7 @@ def command(*args):
 
 
 def desktop_entry(config=None):
-    args = [sys.executable, "-m", "agent_usage"]
+    args = [sys.executable, "-m", "usage"]
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     quoted = []

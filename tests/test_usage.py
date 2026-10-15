@@ -7,8 +7,8 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_usage.history import Usage
-from agent_usage.readers import estimate, project_path
+from usage.history import Usage
+from usage.readers import estimate, project_path
 
 
 def event(kind, second, **payload):

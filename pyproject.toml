@@ -12,16 +12,16 @@ license = "MIT"
 dependencies = ["PySide6-WebEngine==6.12.0.140"]
 
 [project.gui-scripts]
-agent-usage = "agent_usage.__main__:main"
+agent-usage = "usage.__main__:main"
 
 [dependency-groups]
 dev = ["ruff==0.16.8", "pip-audit==2.9.0"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent_usage"]
+packages = ["usage"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/agent_usage", "/tests", "/pyproject.toml", "/README.md", "/LICENSE", "/uv.lock"]
+include = ["/usage", "/tests", "/pyproject.toml", "/README.md", "/LICENSE", "/uv.lock"]
 
 [tool.ruff]
 required-version = "==0.16.8"

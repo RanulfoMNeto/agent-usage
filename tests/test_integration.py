@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_usage.integration import UUID, install_gnome
+from usage.integration import UUID, install_gnome
 
 
 class IntegrationTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class IntegrationTests(unittest.TestCase):
             with (
                 patch("sys.platform", "linux"),
                 patch.dict(os.environ, {"XDG_DATA_HOME": str(root), "XDG_CONFIG_HOME": str(root)}),
-                patch("agent_usage.integration.command", side_effect=command),
+                patch("usage.integration.command", side_effect=command),
             ):
                 install_gnome()
                 install_gnome()
@@ -49,7 +49,7 @@ class IntegrationTests(unittest.TestCase):
                 install_gnome()
         with (
             patch("sys.platform", "linux"),
-            patch("agent_usage.integration.command", return_value="GNOME Shell 49.0") as command,
+            patch("usage.integration.command", return_value="GNOME Shell 49.0") as command,
         ):
             with self.assertRaises(RuntimeError):
                 install_gnome()

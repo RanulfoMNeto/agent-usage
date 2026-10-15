@@ -13,10 +13,10 @@ from PySide6.QtCore import QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
-from agent_usage.config import load_config, user_directory
-from agent_usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
-from agent_usage.history import MAX_IMPORT
-from agent_usage.readers import project_path
+from usage.config import load_config, user_directory
+from usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
+from usage.history import MAX_IMPORT
+from usage.readers import project_path
 
 
 class ConfigTests(unittest.TestCase):
@@ -94,7 +94,7 @@ class DesktopTests(unittest.TestCase):
         self.bridge.request("2", "preferences", "null")
         self.assertEqual(self.responses[-1], value)
         self.window.apply_preferences.assert_called_once_with(value)
-        with patch("agent_usage.desktop.QFileDialog.getExistingDirectory", return_value=""):
+        with patch("usage.desktop.QFileDialog.getExistingDirectory", return_value=""):
             self.bridge.request("3", "choose_directory", '"codex"')
         self.assertEqual(self.responses[-1], {"cancelled": True})
         self.usage.set_sources.assert_not_called()
@@ -102,20 +102,20 @@ class DesktopTests(unittest.TestCase):
     def test_project_picker_preserves_sources_and_cancelled_selection(self):
         self.settings.setValue("appearance", json.dumps({"project": str(self.root)}))
         with patch(
-            "agent_usage.desktop.QFileDialog.getExistingDirectory", return_value=str(self.root)
+            "usage.desktop.QFileDialog.getExistingDirectory", return_value=str(self.root)
         ) as choose:
             self.bridge.request("1", "choose_directory", '"project"')
             choose.assert_called_once_with(self.window, "Project directory", str(self.root))
         self.assertEqual(self.responses[-1], {"path": project_path(str(self.root))})
         self.usage.set_sources.assert_not_called()
-        with patch("agent_usage.desktop.QFileDialog.getExistingDirectory", return_value=""):
+        with patch("usage.desktop.QFileDialog.getExistingDirectory", return_value=""):
             self.bridge.request("2", "choose_directory", '"project"')
         self.assertEqual(self.responses[-1], {"cancelled": True})
         self.assertEqual(json.loads(self.settings.value("appearance"))["project"], str(self.root))
 
     def test_window_stays_visible_without_focus_and_after_pinning(self):
         with (
-            patch("agent_usage.desktop.user_directory", return_value=self.root),
+            patch("usage.desktop.user_directory", return_value=self.root),
             patch.object(Widget, "load"),
         ):
             window = Widget({"width": 400, "compact_width": 300}, self.usage, Mock())
@@ -216,7 +216,7 @@ class DesktopTests(unittest.TestCase):
                 for agent in ("Codex", "Claude Code")
             ]
         }
-        with patch("agent_usage.desktop.user_directory", return_value=self.root):
+        with patch("usage.desktop.user_directory", return_value=self.root):
             window = Widget({"width": 400, "compact_width": 300}, self.usage, subscriptions)
 
         def evaluate(expression):

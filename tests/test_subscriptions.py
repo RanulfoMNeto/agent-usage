@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from agent_usage.subscriptions import (
+from usage.subscriptions import (
     Subscriptions,
     capture_claude,
     claude_snapshot,
@@ -101,7 +101,7 @@ class SubscriptionTests(unittest.TestCase):
                 }
             }
             with patch(
-                "agent_usage.subscriptions.read_codex", new_callable=AsyncMock, return_value=payload
+                "usage.subscriptions.read_codex", new_callable=AsyncMock, return_value=payload
             ) as read:
                 first = source.snapshot()["providers"]
                 source.snapshot()
@@ -111,7 +111,7 @@ class SubscriptionTests(unittest.TestCase):
             self.assertEqual(len(first[1]["windows"]), 1)
             source.checked = None
             with patch(
-                "agent_usage.subscriptions.read_codex",
+                "usage.subscriptions.read_codex",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("SECRET"),
             ):
@@ -143,9 +143,7 @@ print(json.dumps({'method':'notification'}),flush=True)
 print(json.dumps({'id':query['id'],'result':{'rateLimits':None}}),flush=True)
 time.sleep(30)
 """)
-            with patch(
-                "agent_usage.subscriptions.asyncio.create_subprocess_exec", side_effect=track
-            ):
+            with patch("usage.subscriptions.asyncio.create_subprocess_exec", side_effect=track):
                 result = asyncio.run(read_codex([sys.executable, str(script), "ok"], 5))
                 self.assertEqual(result, {"rateLimits": None})
                 self.assertIsNotNone(processes[-1].returncode)

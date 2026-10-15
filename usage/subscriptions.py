@@ -87,7 +87,7 @@ async def read_codex(command, timeout):
                 "initialize",
                 {
                     "clientInfo": {
-                        "name": "agent_usage",
+                        "name": "usage",
                         "title": "Agent Usage",
                         "version": "0.1.0",
                     },
