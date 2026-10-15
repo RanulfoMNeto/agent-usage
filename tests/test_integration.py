@@ -184,8 +184,8 @@ class IntegrationTests(unittest.TestCase):
                         capture_output=True,
                         text=True,
                         timeout=15,
-                        check=True,
                     )
+                    self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
                     self.assertIn("42%", result.stdout)
                     self.assertEqual(
                         json.loads(capture.read_text())["windows"][0]["used_percent"], 42
