@@ -510,11 +510,13 @@ class DesktopTests(unittest.TestCase):
                 for agent in ("Codex", "Claude Code")
             ]
         }
+        # No overflow is not enough: shrinking also waits for the native resize.
         bounds = """(()=>{
             const p=$('settings').open?$('settings'):document.querySelector('.widget');
             const r=p.getBoundingClientRect();
             return r.width>0 && r.height>0 && r.left>=0 && r.top>=0 &&
                 r.right<=innerWidth && r.bottom<=innerHeight &&
+                Math.abs(innerHeight-(r.bottom+r.top))<=2 &&
                 p.scrollHeight<=p.clientHeight+1 &&
                 document.documentElement.scrollHeight<=innerHeight+1 &&
                 document.documentElement.scrollWidth<=innerWidth+1;
