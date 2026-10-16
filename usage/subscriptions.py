@@ -142,7 +142,7 @@ async def read_codex(command, timeout, *, login=None, cancelled=None):
                     "clientInfo": {
                         "name": "usage",
                         "title": "Agent Usage",
-                        "version": "0.1.3",
+                        "version": "0.1.4",
                     },
                 },
             )
