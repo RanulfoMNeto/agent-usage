@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import Future
@@ -11,13 +12,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from usage.config import load_config, user_directory
 from usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
 from usage.history import MAX_IMPORT
 from usage.readers import project_path
-from usage.subscriptions import Subscriptions, capture_claude
+from usage.subscriptions import Subscriptions, claude_snapshot
 
 
 class ConfigTests(unittest.TestCase):
@@ -105,41 +106,31 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.responses[-1], {"cancelled": True})
         self.usage.set_sources.assert_not_called()
 
-    def test_connections_are_explicit_and_custom_capture_requires_confirmation(self):
-        self.bridge.subscriptions.config_path = None
+    def test_connections_open_native_terminal_and_reject_untrusted_requests(self):
         self.bridge.subscriptions.config = {"claude_command": ["claude"]}
+        self.bridge.subscriptions.lock = threading.Lock()
+        self.bridge.subscriptions.checked = {"claude": 123}
         self.bridge.subscriptions.snapshot.return_value = {"providers": []}
         with (
             patch("usage.desktop.claude_terminal_command", return_value=["claude"]),
             patch("usage.desktop.open_claude_terminal") as terminal,
-            patch(
-                "usage.desktop.install_claude_statusline", return_value="claude_custom_statusline"
-            ) as install,
-            patch(
-                "usage.desktop.QMessageBox.question", return_value=QMessageBox.StandardButton.No
-            ) as confirm,
         ):
             self.bridge.request("1", "connect", '"claude"')
-            self.assertEqual(self.responses[-1], {"cancelled": True})
-            install.assert_called_once_with(None)
-            confirm.return_value = QMessageBox.StandardButton.Yes
-            install.side_effect = ["claude_custom_statusline", "claude_waiting"]
-            self.bridge.request("2", "connect", '"claude"')
-            install.assert_called_with(None, replace=True)
             QTest.qWait(40)
             self.assertEqual(self.responses[-1], {"providers": []})
             terminal.assert_called_once_with(["claude"])
             self.usage.set_connection.assert_called_once_with("claude", True)
-            install.reset_mock()
+            self.assertNotIn("claude", self.bridge.subscriptions.checked)
+            terminal.reset_mock()
             self.window.config = {"demo": True}
-            self.bridge.request("3", "connect", '"claude"')
+            self.bridge.request("2", "connect", '"claude"')
             self.assertIn("error", self.responses[-1])
-            install.assert_not_called()
+            terminal.assert_not_called()
             self.window.config = {}
-            self.bridge.request("4", "connect", '"arbitrary-command"')
+            self.bridge.request("3", "connect", '"arbitrary-command"')
             self.assertIn("error", self.responses[-1])
-            install.assert_not_called()
-            self.bridge.request("5", "cancel_login", '"codex"')
+            terminal.assert_not_called()
+            self.bridge.request("4", "cancel_login", '"codex"')
             self.bridge.subscriptions.cancel_login.assert_called_once_with()
 
         with patch("usage.desktop.QDesktopServices.openUrl", return_value=True) as open_url:
@@ -450,10 +441,8 @@ class DesktopTests(unittest.TestCase):
                     ("Codex", "not_found", "Not installed"),
                     ("Codex", "login_required", "Not connected"),
                     ("Codex", "unsupported_account", "Subscription required"),
-                    ("Claude Code", "claude_waiting", "Waiting for usage"),
-                    ("Claude Code", "claude_no_limits", "No limits reported"),
-                    ("Claude Code", "claude_setup_required", "Not connected"),
-                    ("Claude Code", "claude_setup_failed", "Check Claude settings"),
+                    ("Claude Code", "login_required", "Not connected"),
+                    ("Claude Code", "unsupported_version", "Update Claude Code"),
                 ):
                     window.page().runJavaScript(
                         f"providers=[{{agent:'{agent}',windows:[],issue:'{issue}'}}];render()"
@@ -462,35 +451,38 @@ class DesktopTests(unittest.TestCase):
                         "[...document.querySelectorAll('.quota-unavailable .caption')]"
                         f".some(node=>node.textContent==='{label}')"
                     )
-                # A native capture must reach Settings and gauges without clicks or restart.
-                config = load_config()["subscriptions"]
-                config["claude_file"] = str(self.root / "claude.json")
-                source = Subscriptions(config)
-                source.query_codex = Mock(
-                    return_value={"agent": "Codex", "windows": [], "updated_at": now}
+                # Native account updates must reach Settings and gauges without terminal capture.
+                source = Subscriptions(load_config()["subscriptions"])
+                source.query = Mock(
+                    return_value={
+                        "agent": "Claude Code",
+                        "windows": [],
+                        "updated_at": None,
+                        "issue": "login_required",
+                    }
                 )
-                self.usage.connections = {"claude": True}
+                self.usage.connections = {"codex": False, "claude": True}
                 window.bridge.subscriptions = source
                 window.page().runJavaScript("openSettings()")
-                with patch("usage.subscriptions.claude_status", return_value="claude_waiting"):
-                    wait_for("$('claude-connection').textContent==='Waiting for usage'")
-                    capture_claude(
-                        config["claude_file"],
-                        {
-                            "rate_limits": {
-                                "five_hour": {"used_percentage": 0, "resets_at": now + 3600},
-                                "seven_day": {"used_percentage": 3, "resets_at": now + 86400},
-                            }
-                        },
-                    )
-                    wait_for("$('claude-connection').textContent==='Connected'")
-                    self.assertEqual(
-                        evaluate("""[...document.querySelectorAll(
-                            '.quota-card[data-agent="Claude Code"] .quota-percent')]
-                            .map(node=>node.textContent)"""),
-                        ["0%", "3%"],
-                    )
-                    source.query_codex.assert_called_once()
+                wait_for("$('claude-connection').textContent==='Not connected'")
+                source.query.return_value = claude_snapshot(
+                    {
+                        "rate_limits": {
+                            "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
+                            "seven_day": {"utilization": 3, "resets_at": "2099-01-07T00:00:00Z"},
+                        }
+                    },
+                    time.time(),
+                )
+                source.checked.clear()
+                wait_for("$('claude-connection').textContent==='Connected'")
+                self.assertEqual(
+                    evaluate("""[...document.querySelectorAll(
+                    '.quota-card[data-agent="Claude Code"] .quota-percent')]
+                    .map(node=>node.textContent)"""),
+                    ["0%", "3%"],
+                )
+                self.assertEqual(source.query.call_count, 2)
         finally:
             window.close()
             window.bridge.close()

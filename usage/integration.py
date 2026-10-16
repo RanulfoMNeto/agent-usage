@@ -120,21 +120,6 @@ def launch_command(config=None):
     return args
 
 
-def claude_command(config=None):
-    """Quote once for Claude's shell; Windows supports both Git Bash and PowerShell."""
-    args = [Path(arg).as_posix() for arg in launch_command(config)] + ["--capture-claude"]
-    if sys.platform == "win32":
-        quoted = " ".join("'" + arg.replace("'", "''") + "'" for arg in args)
-        script = (
-            "# Agent Usage status line\n"
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "[Console]::In.ReadToEnd() | & " + quoted + "; exit $LASTEXITCODE"
-        )
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
-    return shlex.join(args)
-
-
 def owns_claude_command(command):
     """Recognize our generated commands, including the previous manual installation."""
     if not isinstance(command, str):
@@ -162,81 +147,48 @@ def owns_claude_command(command):
         return False
 
 
-def claude_status(config=None):
-    """Inspect the connection without changing the agent's settings."""
-    directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
-    if not directory.is_dir():
-        return "claude_not_found"
-    path = directory / "settings.json"
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
-        previous = settings.get("statusLine") or {}
-        return (
-            "claude_waiting"
-            if previous.get("type") == "command"
-            and previous.get("command") == claude_command(config)
-            else "claude_setup_required"
-        )
-    except (OSError, ValueError, AttributeError):
-        return "claude_setup_failed"
-
-
-def install_claude_statusline(config=None, *, replace=False):
-    """Set up capture on request; replacing another status line requires consent."""
+def remove_legacy_claude_statusline():
+    """Remove only our retired capture; restore a backed-up custom status line."""
     from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 
     directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / "settings.json"
+    if not path.is_file():
+        return
     lock = QLockFile(str(path) + ".agent-usage.lock")
     if not lock.tryLock(0):
         raise OSError("Claude settings are busy")
     try:
-        original = path.read_bytes() if path.exists() else None
-        settings = json.loads(original.decode("utf-8-sig")) if original is not None else {}
-        if not isinstance(settings, dict):
-            raise ValueError("Invalid Claude settings")
-        previous = settings.get("statusLine")
-        custom = previous is not None and (
-            not isinstance(previous, dict)
-            or previous.get("type") != "command"
-            or not owns_claude_command(previous.get("command"))
+        original = path.read_bytes()
+        settings = json.loads(original.decode("utf-8-sig"))
+        current = settings.get("statusLine") if isinstance(settings, dict) else None
+        if not isinstance(current, dict) or not owns_claude_command(current.get("command")):
+            return
+        settings.pop("statusLine")
+        backups = sorted(
+            directory.glob("settings.json.agent-usage*.bak"),
+            key=lambda p: p.stat().st_mtime_ns,
+            reverse=True,
         )
-        if custom and not replace:
-            return "claude_custom_statusline"
-        statusline = {
-            **(previous if isinstance(previous, dict) else {}),
-            "type": "command",
-            "command": claude_command(config),
-        }
-        if previous == statusline:
-            return "claude_waiting"
-        settings["statusLine"] = statusline
-        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        backup = path.with_name("settings.json.agent-usage.bak")
-        if original is not None and (custom or not backup.exists()):
-            # Never overwrite an earlier backup when replacing a custom command.
-            stream = (
-                tempfile.NamedTemporaryFile(
-                    prefix="settings.json.agent-usage-", suffix=".bak", dir=directory, delete=False
-                )
-                if backup.exists()
-                else backup.open("xb")
-            )
-            with stream:
-                if os.name != "nt":
-                    os.fchmod(stream.fileno(), 0o600)
-                stream.write(original)
+        for backup in backups:
+            try:
+                prior = json.loads(backup.read_text(encoding="utf-8-sig")).get("statusLine")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(prior, dict) and not owns_claude_command(prior.get("command")):
+                settings["statusLine"] = prior
+                break
+            if prior is None:
+                break
+        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode()
         output = QSaveFile(str(path))
         if not output.open(QIODevice.OpenModeFlag.WriteOnly):
             raise OSError("Claude settings are not writable")
-        current = path.read_bytes() if path.exists() else None
-        if current != original or output.write(body) != len(body):
+        if path.read_bytes() != original or output.write(body) != len(body):
             output.cancelWriting()
-            raise OSError("Claude settings changed during setup")
+            raise OSError("Claude settings changed during migration")
         if not output.commit():
             raise OSError("Could not save Claude settings")
-        return "claude_waiting"
     finally:
         lock.unlock()
 

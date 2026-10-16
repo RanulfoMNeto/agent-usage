@@ -11,35 +11,21 @@ from unittest.mock import AsyncMock, patch
 
 from usage.integration import agent_command
 from usage.subscriptions import (
-    CodexUnavailable,
+    AgentUnavailable,
     Subscriptions,
-    capture_claude,
     claude_snapshot,
     codex_snapshot,
+    read_claude,
     read_codex,
 )
 
 
 class SubscriptionTests(unittest.TestCase):
-    def test_disconnected_agents_do_not_query_accounts_or_read_captures(self):
-        source = Subscriptions(
-            dict(
-                codex_command=["codex"],
-                claude_file="unused",
-                refresh_seconds=60,
-                timeout_seconds=2,
-                stale_seconds=300,
-            )
-        )
-        with (
-            patch("usage.subscriptions.read_codex", new_callable=AsyncMock) as read,
-            patch("usage.subscriptions.Path.read_text") as capture,
-            patch("usage.subscriptions.claude_status") as status,
-        ):
+    def test_disconnected_agents_never_query_accounts(self):
+        source = Subscriptions({"refresh_seconds": 60})
+        with patch.object(source, "query") as query:
             providers = source.snapshot({"codex": False, "claude": False})["providers"]
-            read.assert_not_called()
-            capture.assert_not_called()
-            status.assert_not_called()
+            query.assert_not_called()
             self.assertTrue(
                 all(
                     p["issue"] == "disconnected" and not p["connected"] and not p["windows"]
@@ -89,8 +75,8 @@ time.sleep(30)
                 self.assertIsNotNone(processes[-1].returncode)
                 for mode, error, message in (
                     ("bad-url", ValueError, "Invalid native login URL"),
-                    ("reject", CodexUnavailable, "login_cancelled"),
-                    ("cancel", CodexUnavailable, "login_cancelled"),
+                    ("reject", AgentUnavailable, "login_cancelled"),
+                    ("cancel", AgentUnavailable, "login_cancelled"),
                 ):
                     with self.subTest(mode=mode):
                         cancelled = threading.Event()
@@ -203,98 +189,106 @@ time.sleep(30)
         for value in (None, True, -1, 101, float("nan"), "invalid"):
             with self.subTest(value=value):
                 snapshot = claude_snapshot(
-                    {"rate_limits": {"five_hour": {"used_percentage": value, "resets_at": 2000}}},
+                    {
+                        "rate_limits": {
+                            "five_hour": {"utilization": value, "resets_at": "2099-01-01T00:00:00Z"}
+                        }
+                    },
                     1000,
                 )
                 self.assertEqual(snapshot["windows"], [])
         self.assertEqual(claude_snapshot({}, 1000)["windows"], [])
 
-    def test_claude_capture_is_private_atomic_and_whitelisted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "state" / "claude.json"
-            capture_claude(
-                path,
-                {
-                    "cwd": "SECRET",
-                    "transcript_path": "PRIVATE",
-                    "rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 2000}},
-                },
+    def test_both_accounts_refresh_independently_of_terminal_activity(self):
+        source = Subscriptions(
+            dict(
+                codex_command=["codex"],
+                claude_command=["claude"],
+                refresh_seconds=60,
+                timeout_seconds=2,
+                stale_seconds=300,
             )
-            self.assertEqual(json.loads(path.read_text())["windows"][0]["used_percent"], 12)
-            if os.name != "nt":
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            self.assertNotIn("SECRET", path.read_text())
-            self.assertNotIn("PRIVATE", path.read_text())
-            capture_claude(path, {})
-            self.assertEqual(json.loads(path.read_text())["windows"], [])
-            self.assertEqual(list(path.parent.iterdir()), [path])
-
-    def test_refresh_failure_expiry_and_staleness_are_honest(self):
-        now = time.time()
+        )
+        payload = {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
+                "seven_day": {"utilization": 3, "resets_at": "2099-01-07T00:00:00Z"},
+            },
+            "session": "PRIVATE",
+            "subscription_type": "pro",
+        }
         with (
-            tempfile.TemporaryDirectory() as directory,
-            patch("usage.subscriptions.claude_status", return_value="claude_waiting"),
+            patch(
+                "usage.subscriptions.read_codex",
+                new_callable=AsyncMock,
+                return_value={"rateLimits": None},
+            ) as codex,
+            patch(
+                "usage.subscriptions.read_claude", new_callable=AsyncMock, return_value=payload
+            ) as claude,
         ):
-            path = Path(directory) / "claude.json"
-            path.write_text(
-                json.dumps(
-                    dict(
-                        updated_at=now - 600,
-                        windows=[
-                            dict(minutes=300, used_percent=20, resets_at=now + 3600),
-                            dict(minutes=10080, used_percent=90, resets_at=now - 10),
-                        ],
-                    )
-                )
-            )
-            source = Subscriptions(
-                dict(
-                    codex_command=["codex"],
-                    claude_file=str(path),
-                    refresh_seconds=60,
-                    timeout_seconds=2,
-                    stale_seconds=300,
-                )
-            )
-            payload = {
-                "rateLimits": {
-                    "primary": {
-                        "usedPercent": 5,
-                        "windowDurationMins": 10080,
-                        "resetsAt": now + 3600,
-                    }
-                }
-            }
-            with patch(
-                "usage.subscriptions.read_codex", new_callable=AsyncMock, return_value=payload
-            ) as read:
-                first = source.snapshot()["providers"]
-                source.snapshot()
-                self.assertEqual(read.await_count, 1)
-            self.assertEqual(first[0]["status"], "available")
-            self.assertEqual(first[1]["status"], "stale")
-            self.assertEqual(len(first[1]["windows"]), 1)
-            capture_claude(path, {})
-            self.assertEqual(source.snapshot()["providers"][1]["issue"], "claude_no_limits")
-            path.unlink()
-            self.assertEqual(source.snapshot()["providers"][1]["issue"], "claude_waiting")
+            first = source.snapshot()["providers"][1]
+            self.assertEqual(first["status"], "available")
+            self.assertEqual([w["used_percent"] for w in first["windows"]], [0, 3])
+            self.assertNotIn("PRIVATE", json.dumps(first))
+            source.snapshot()
+            self.assertEqual(codex.await_count, 1)
+            self.assertEqual(claude.await_count, 1)
+            source.checked["claude"] -= 61
+            payload["rate_limits"]["seven_day"]["utilization"] = 7
+            self.assertEqual(source.snapshot()["providers"][1]["windows"][1]["used_percent"], 7)
+            self.assertEqual(codex.await_count, 1)
+            self.assertEqual(claude.await_count, 2)
             for error, issue in (
                 (RuntimeError("SECRET"), "query_failed"),
                 (FileNotFoundError("PRIVATE"), "not_found"),
-                (CodexUnavailable("login_required"), "login_required"),
-                (CodexUnavailable("unsupported_account"), "unsupported_account"),
+                (AgentUnavailable("login_required"), "login_required"),
+                (AgentUnavailable("unsupported_version"), "unsupported_version"),
                 (TimeoutError("SECRET"), "timeout"),
             ):
-                source.checked = None
-                with patch(
-                    "usage.subscriptions.read_codex", new_callable=AsyncMock, side_effect=error
-                ):
-                    failed = source.snapshot()["providers"][0]
+                source.checked.clear()
+                claude.side_effect = error
+                failed = source.snapshot()["providers"][1]
                 self.assertEqual(failed["status"], "unavailable")
                 self.assertEqual(failed["windows"], [])
                 self.assertEqual(failed["issue"], issue)
                 self.assertNotIn("SECRET", json.dumps(failed))
-                self.assertNotIn("PRIVATE", json.dumps(failed))
+
+    def test_claude_control_queries_never_send_prompts_and_stop_on_failures(self):
+        processes = []
+        create = asyncio.create_subprocess_exec
+
+        async def track(*args, **kwargs):
+            self.assertIn("--safe-mode", args)
+            self.assertIn("--no-session-persistence", args)
+            self.assertEqual(list(Path(kwargs["cwd"]).iterdir()), [])
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "native.py"
+            script.write_text(
+                "import json, sys, time\nmode=sys.argv[1]\nfor line in sys.stdin:\n    msg=json.loads(line)\n    assert msg['type']=='control_request'\n    kind=msg['request']['subtype']\n    assert kind in ('initialize', 'get_usage')\n    response={'subtype':'success','request_id':msg['request_id']}\n    if kind=='initialize':\n        response['response']={'account':{'tokenSource':'none'} if mode=='signed-out' else {'email':'PRIVATE'}}\n    else:\n        assert msg['request']['skip_behaviors'] is True\n        if mode=='hang': time.sleep(30)\n        if mode=='unsupported': response.update(subtype='error',error='Unsupported control request subtype: get_usage')\n        elif mode=='permission':\n            print(json.dumps({'type':'control_request','request':{'subtype':'can_use_tool'}}),flush=True)\n            time.sleep(30)\n        else: response['response']={'rate_limits_available':mode!='api-key','rate_limits':{'five_hour':{'utilization':0,'resets_at':'2099-01-01T00:00:00Z'}}}\n    print(json.dumps({'type':'control_response','response':response}),flush=True)\n"
+            )
+            with patch("usage.subscriptions.asyncio.create_subprocess_exec", side_effect=track):
+                payload = asyncio.run(read_claude([sys.executable, str(script), "ok"], 5))
+                self.assertEqual(
+                    claude_snapshot(payload, time.time())["windows"][0]["used_percent"], 0
+                )
+                self.assertIsNotNone(processes[-1].returncode)
+                self.assertNotIn("PRIVATE", json.dumps(payload))
+                for mode, error, message in (
+                    ("signed-out", AgentUnavailable, "login_required"),
+                    ("api-key", AgentUnavailable, "unsupported_account"),
+                    ("unsupported", AgentUnavailable, "unsupported_version"),
+                    ("permission", RuntimeError, "Unexpected native permission request"),
+                    ("hang", TimeoutError, ""),
+                ):
+                    with self.assertRaisesRegex(error, message):
+                        asyncio.run(read_claude([sys.executable, str(script), mode], 0.3))
+                    self.assertIsNotNone(processes[-1].returncode)
 
     def test_native_protocol_handshake_and_timeout_cleanup(self):
         processes = []
@@ -333,7 +327,7 @@ time.sleep(30)
                     ("signed-out", "login_required"),
                     ("api-key", "unsupported_account"),
                 ):
-                    with self.assertRaisesRegex(CodexUnavailable, issue):
+                    with self.assertRaisesRegex(AgentUnavailable, issue):
                         asyncio.run(read_codex([sys.executable, str(script), mode], 5))
                     self.assertIsNotNone(processes[-1].returncode)
                 with self.assertRaises(TimeoutError):

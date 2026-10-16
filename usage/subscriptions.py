@@ -2,19 +2,19 @@
 
 import asyncio
 import json
-import os
 import subprocess
 import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .integration import agent_command, claude_status
+from .integration import agent_command
 from .readers import number
 
 
-class CodexUnavailable(RuntimeError):
+class AgentUnavailable(RuntimeError):
     """A known account condition, without native error text or credentials."""
 
 
@@ -63,30 +63,49 @@ def claude_snapshot(payload, now):
     limits = payload.get("rate_limits") or {}
     for key, minutes in (("five_hour", 300), ("seven_day", 10080)):
         source = limits.get(key) or {}
-        item = window(
-            "Claude Code", minutes, source.get("used_percentage"), source.get("resets_at")
-        )
+        try:
+            resets = datetime.fromisoformat(source["resets_at"].replace("Z", "+00:00"))
+            if resets.tzinfo is None:
+                continue
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        item = window("Claude Code", minutes, source.get("utilization"), resets.timestamp())
         if item:
             windows.append(item)
     return dict(
-        agent="Claude Code", source="Native terminal status line", updated_at=now, windows=windows
+        agent="Claude Code", source="Native account limits", updated_at=now, windows=windows
     )
 
 
-async def read_codex(command, timeout, *, login=None, cancelled=None):
-    """Read native limits; start browser login only when explicitly requested."""
-    process = await asyncio.create_subprocess_exec(
+async def start_native(agent, command, *args, cwd=None):
+    return await asyncio.create_subprocess_exec(
         *[
             str(Path(arg).expanduser()) if arg.startswith("~") else arg
-            for arg in agent_command("codex", command)
+            for arg in agent_command(agent, command)
         ],
-        "app-server",
+        *args,
+        cwd=cwd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         limit=1024 * 1024,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+
+
+async def stop_native(process):
+    if process.returncode is None:
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), 2)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+async def read_codex(command, timeout, *, login=None, cancelled=None):
+    """Read native limits; start browser login only when explicitly requested."""
+    process = await start_native("codex", command, "app-server")
 
     async def send(message):
         process.stdin.write((json.dumps(message) + "\n").encode())
@@ -104,7 +123,7 @@ async def read_codex(command, timeout, *, login=None, cancelled=None):
     async def receive():
         while True:
             if cancelled is not None and cancelled.is_set():
-                raise CodexUnavailable("login_cancelled")
+                raise AgentUnavailable("login_cancelled")
             try:
                 line = await asyncio.wait_for(process.stdout.readline(), 0.25)
             except TimeoutError:
@@ -142,15 +161,15 @@ async def read_codex(command, timeout, *, login=None, cancelled=None):
                         and params.get("loginId") == login_id
                     ):
                         if params.get("success") is not True:
-                            raise CodexUnavailable("login_cancelled")
+                            raise AgentUnavailable("login_cancelled")
                         login_id = None
                         break
                 deadline.reschedule(asyncio.get_running_loop().time() + timeout)
                 account = await request(4, "account/read", {"refreshToken": False})
             if account.get("account") is None and account.get("requiresOpenaiAuth"):
-                raise CodexUnavailable("login_required")
+                raise AgentUnavailable("login_required")
             if (account.get("account") or {}).get("type") in ("apiKey", "amazonBedrock"):
-                raise CodexUnavailable("unsupported_account")
+                raise AgentUnavailable("unsupported_account")
             return await request(5, "account/rateLimits/read", {})
     finally:
         if login_id is not None and process.returncode is None:
@@ -158,48 +177,85 @@ async def read_codex(command, timeout, *, login=None, cancelled=None):
                 await send(dict(id=6, method="account/login/cancel", params={"loginId": login_id}))
             except (OSError, RuntimeError):
                 pass
-        if process.returncode is None:
-            process.terminate()
+        await stop_native(process)
+
+
+async def read_claude(command, timeout):
+    """Use the extension's experimental get_usage control request, without a model turn."""
+    # An empty working directory and safe mode prevent loading project tools or hooks.
+    with tempfile.TemporaryDirectory(prefix="agent-usage-") as directory:
+        process = await start_native(
+            "claude",
+            command,
+            "--safe-mode",
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--no-session-persistence",
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "",
+            cwd=directory,
+        )
+
+        async def request(kind, **params):
+            message = dict(
+                type="control_request", request_id=kind, request=dict(subtype=kind, **params)
+            )
+            process.stdin.write((json.dumps(message) + "\n").encode())
+            await process.stdin.drain()
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    raise AgentUnavailable("unsupported_version")
+                message = json.loads(line)
+                if message.get("type") == "control_request":
+                    raise RuntimeError("Unexpected native permission request")
+                response = message.get("response") or {}
+                if message.get("type") == "control_response" and response.get("request_id") == kind:
+                    if response.get("subtype") != "success":
+                        if "Unsupported control request" in str(response.get("error")):
+                            raise AgentUnavailable("unsupported_version")
+                        raise RuntimeError("Native account query failed")
+                    return response["response"]
+
         try:
-            await asyncio.wait_for(process.wait(), 2)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-
-
-def capture_claude(path, payload):
-    """Store only quota fields, atomically; never persist the full status payload."""
-    snapshot = claude_snapshot(payload, time.time())
-    path = Path(path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
-    temporary = Path(stream.name)
-    try:
-        with stream:
-            json.dump(snapshot, stream, allow_nan=False)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return snapshot
+            async with asyncio.timeout(timeout):
+                initialized = await request("initialize")
+                if (initialized.get("account") or {}).get("tokenSource") == "none":
+                    raise AgentUnavailable("login_required")
+                payload = await request("get_usage", skip_behaviors=True)
+                if payload.get("rate_limits_available") is not True:
+                    raise AgentUnavailable("unsupported_account")
+                return payload
+        finally:
+            await stop_native(process)
 
 
 class Subscriptions:
-    def __init__(self, config, *, config_path=None):
+    def __init__(self, config):
         self.config = config
-        self.config_path = config_path
         self.lock = threading.Lock()
         self.login_lock = threading.Lock()
         self.cancelled = threading.Event()
         self.closed = False
-        self.checked = None
-        self.codex = None
+        self.checked = {}
+        self.providers = {}
 
-    def query_codex(self, **options):
+    def query(self, agent, **options):
+        name, reader, normalize = {
+            "codex": ("Codex", read_codex, codex_snapshot),
+            "claude": ("Claude Code", read_claude, claude_snapshot),
+        }[agent]
         try:
             payload = asyncio.run(
-                read_codex(self.config["codex_command"], self.config["timeout_seconds"], **options)
+                reader(self.config[agent + "_command"], self.config["timeout_seconds"], **options)
             )
-            return codex_snapshot(payload, time.time())
+            return normalize(payload, time.time())
         except (
             OSError,
             ValueError,
@@ -211,7 +267,7 @@ class Subscriptions:
         ) as exc:
             issue = (
                 str(exc)
-                if isinstance(exc, CodexUnavailable)
+                if isinstance(exc, AgentUnavailable)
                 else "not_found"
                 if isinstance(exc, FileNotFoundError)
                 else "timeout"
@@ -219,11 +275,7 @@ class Subscriptions:
                 else "query_failed"
             )
             return dict(
-                agent="Codex",
-                source="Native account limits",
-                updated_at=None,
-                windows=[],
-                issue=issue,
+                agent=name, source="Native account limits", updated_at=None, windows=[], issue=issue
             )
 
     def connect_codex(self, open_browser):
@@ -233,10 +285,10 @@ class Subscriptions:
             self.cancelled.clear()
             if self.closed:
                 self.cancelled.set()
-            result = self.query_codex(login=open_browser, cancelled=self.cancelled)
+            result = self.query("codex", login=open_browser, cancelled=self.cancelled)
             with self.lock:
-                self.codex = result
-                self.checked = time.monotonic()
+                self.providers["codex"] = result
+                self.checked["codex"] = time.monotonic()
         finally:
             self.login_lock.release()
         return result
@@ -248,82 +300,35 @@ class Subscriptions:
     def snapshot(self, connections=None):
         connections = connections or {}
         with self.lock:
-            if connections.get("codex") is not False and (
-                self.checked is None
-                or time.monotonic() - self.checked >= self.config["refresh_seconds"]
-            ):
-                self.codex = self.query_codex()
-                self.checked = time.monotonic()
-            try:
-                raw = (
-                    {}
-                    if connections.get("claude") is False
-                    else json.loads(
-                        Path(self.config["claude_file"]).expanduser().read_text(encoding="utf-8")
-                    )
-                )
-                # Revalidate the local snapshot; serve no arbitrary captured fields.
-                claude = dict(
-                    agent="Claude Code",
-                    source="Native terminal status line",
-                    updated_at=number(raw.get("updated_at")),
-                    windows=[],
-                )
-                for source in raw.get("windows", []):
-                    item = window(
-                        "Claude Code",
-                        source.get("minutes"),
-                        source.get("used_percent"),
-                        source.get("resets_at"),
-                    )
-                    if item:
-                        claude["windows"].append(item)
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                claude = dict(
-                    agent="Claude Code",
-                    source="Native terminal status line",
-                    updated_at=None,
-                    windows=[],
-                )
-            now = time.time()
-            issue = (
-                "disconnected"
-                if connections.get("claude") is False
-                else claude_status(self.config_path)
-            )
-            claude["issue"] = (
-                "claude_no_limits"
-                if issue == "claude_waiting"
-                and claude["updated_at"] is not None
-                and not claude["windows"]
-                else issue
-            )
             providers = []
-            codex = self.codex or dict(agent="Codex", windows=[], updated_at=None)
-            for provider in (codex, claude):
-                result = dict(provider)
-                key = "codex" if provider["agent"] == "Codex" else "claude"
-                if connections.get(key) is False:
-                    result.update(
-                        windows=[],
-                        updated_at=None,
-                        status="unavailable",
-                        issue="disconnected",
-                        connected=False,
+            for agent, name in (("codex", "Codex"), ("claude", "Claude Code")):
+                if connections.get(agent) is False:
+                    providers.append(
+                        dict(
+                            agent=name,
+                            windows=[],
+                            updated_at=None,
+                            status="unavailable",
+                            issue="disconnected",
+                            connected=False,
+                        )
                     )
-                    providers.append(result)
                     continue
-                result["windows"] = [w for w in provider["windows"] if w["resets_at"] > now]
-                age = now - provider["updated_at"] if provider["updated_at"] is not None else None
+                checked = self.checked.get(agent)
+                if checked is None or time.monotonic() - checked >= self.config["refresh_seconds"]:
+                    self.providers[agent] = self.query(agent)
+                    self.checked[agent] = time.monotonic()
+                result = dict(self.providers[agent])
+                now = time.time()
+                result["windows"] = [w for w in result["windows"] if w["resets_at"] > now]
+                age = now - result["updated_at"] if result["updated_at"] is not None else None
                 result["status"] = (
                     "unavailable"
                     if not result["windows"]
-                    else (
-                        "stale"
-                        if age is None or age < -5 or age > self.config["stale_seconds"]
-                        else "available"
-                    )
+                    else "stale"
+                    if age is None or age < -5 or age > self.config["stale_seconds"]
+                    else "available"
                 )
-                result["connected"] = connections.get(key, bool(result["windows"]))
+                result["connected"] = connections.get(agent, bool(result["windows"]))
                 providers.append(result)
             return dict(providers=providers)

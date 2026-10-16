@@ -16,7 +16,7 @@ show_question = true
 [subscriptions]
 codex_command = ["codex"]
 claude_command = ["claude"]
-# Native account queries; local snapshots follow the collection interval.
+# Native account queries; the interface follows the collection interval.
 refresh_seconds = 60
 timeout_seconds = 10
 stale_seconds = 300

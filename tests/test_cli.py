@@ -1,7 +1,4 @@
-import json
 import os
-import shlex
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +7,7 @@ from unittest.mock import patch
 from usage.__main__ import main
 from usage.demo import profile
 from usage.history import Usage
-from usage.integration import claude_command, launch_command
+from usage.integration import launch_command
 
 
 class CLITests(unittest.TestCase):
@@ -43,64 +40,9 @@ class CLITests(unittest.TestCase):
             self.assertFalse(root.exists())
         self.assertEqual(dict(os.environ), original)
 
-    def test_generated_claude_config_captures_only_quota_fields(self):
-        with profile() as (config, _):
-            root = Path(os.environ["CODEX_HOME"]).parent
-            override = root / "custom config.toml"
-            (root / "usage.py").write_text("raise RuntimeError('Project module must not run')\n")
-            custom_capture = root / "custom limits.json"
-            override.write_text(
-                "[subscriptions]\nclaude_file = " + json.dumps(custom_capture.as_posix()) + "\n"
-            )
-            for override_path, capture in (
-                (None, Path(config["subscriptions"]["claude_file"])),
-                (override, custom_capture),
-            ):
-                with self.subTest(config=override_path):
-                    command = shlex.split(claude_command(override_path))
-                    result = subprocess.run(
-                        command,
-                        cwd=root,
-                        input=json.dumps(
-                            {
-                                "cwd": "PRIVATE",
-                                "rate_limits": {
-                                    "seven_day": {"used_percentage": 42, "resets_at": 2000000000}
-                                },
-                            }
-                        ),
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-                    self.assertIn("42%", result.stdout)
-                    captured = capture.read_text()
-                    self.assertNotIn("PRIVATE", captured)
-                    self.assertEqual(json.loads(captured)["windows"][0]["used_percent"], 42)
-
     def test_packaged_launcher_does_not_invoke_python_module(self):
         with patch.object(sys, "frozen", True, create=True):
             self.assertEqual(launch_command(), [sys.executable])
-
-    def test_disconnected_capture_ignores_input_and_keeps_previous_snapshot(self):
-        with profile() as (config, _):
-            store = Usage(config)
-            try:
-                store.set_connection("claude", False)
-                capture = Path(config["subscriptions"]["claude_file"])
-                capture.parent.mkdir(parents=True, exist_ok=True)
-                capture.write_text("previous snapshot")
-                result = subprocess.run(
-                    shlex.split(claude_command()),
-                    input="PRIVATE",
-                    text=True,
-                    capture_output=True,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "")
-                self.assertEqual(capture.read_text(), "previous snapshot")
-            finally:
-                store.close()
 
     def test_launch_registers_shortcut_but_never_configures_agents(self):
         with profile() as (config, _):
@@ -109,7 +51,7 @@ class CLITests(unittest.TestCase):
                 patch("usage.desktop.run") as run,
                 patch("usage.integration.install_windows_shortcut") as shortcut,
                 patch(
-                    "usage.integration.install_claude_statusline", return_value="claude_waiting"
+                    "usage.integration.remove_legacy_claude_statusline", return_value=None
                 ) as claude,
                 patch("sys.platform", "win32"),
                 patch.object(sys, "frozen", False, create=True),
@@ -117,8 +59,10 @@ class CLITests(unittest.TestCase):
             ):
                 main()
                 shortcut.assert_called_once_with(None)
-                claude.assert_not_called()
-                self.assertIsNone(run.call_args.kwargs["subscriptions"].config_path)
+                claude.assert_called_once_with()
+                self.assertEqual(
+                    run.call_args.kwargs["subscriptions"].config, config["subscriptions"]
+                )
                 shortcut.reset_mock()
                 claude.reset_mock()
                 with patch.object(sys, "argv", ["agent-usage", "--demo"]):
@@ -128,7 +72,7 @@ class CLITests(unittest.TestCase):
                 config["integrations"] = {"windows_shortcut": False}
                 main()
                 shortcut.assert_not_called()
-                claude.assert_not_called()
+                claude.assert_called_once_with()
 
     def test_setup_failure_does_not_prevent_widget_startup(self):
         with profile() as (config, _):
@@ -136,11 +80,11 @@ class CLITests(unittest.TestCase):
                 patch("usage.__main__.load_config", return_value=config),
                 patch("usage.desktop.run") as run,
                 patch("usage.integration.install_windows_shortcut", side_effect=OSError),
-                patch("usage.integration.install_claude_statusline", side_effect=OSError),
+                patch("usage.integration.remove_legacy_claude_statusline", side_effect=OSError),
                 patch("sys.platform", "win32"),
                 patch.object(sys, "argv", ["agent-usage"]),
                 self.assertLogs(level="WARNING") as logs,
             ):
                 main()
                 run.assert_called_once()
-                self.assertEqual(len(logs.output), 1)
+                self.assertEqual(len(logs.output), 2)

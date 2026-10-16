@@ -37,7 +37,6 @@ from .integration import (
     ConnectionUnavailable,
     claude_terminal_command,
     gnome_call,
-    install_claude_statusline,
     open_claude_terminal,
 )
 from .readers import project_path
@@ -118,22 +117,6 @@ class Bridge(QObject):
                     return
                 if method == "connect" and args == "claude":
                     terminal = claude_terminal_command(self.subscriptions.config["claude_command"])
-                    config = self.subscriptions.config_path
-                    issue = install_claude_statusline(config)
-                    if issue == "claude_custom_statusline":
-                        answer = QMessageBox.question(
-                            self.window,
-                            "Claude terminal capture",
-                            "Replace your current Claude terminal status line with Agent Usage?\n\n"
-                            "A backup will be kept. Limits require Claude terminal use; "
-                            "the VS Code chat panel alone does not supply them.",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                            QMessageBox.StandardButton.No,
-                        )
-                        if answer != QMessageBox.StandardButton.Yes:
-                            self.respond(identifier, {"cancelled": True})
-                            return
-                        install_claude_statusline(config, replace=True)
                     self.terminal = open_claude_terminal(terminal)
             if method == "preferences":
                 values = json.loads(self.settings.value("appearance", "{}"))
@@ -222,12 +205,15 @@ class Bridge(QObject):
                 result = self.subscriptions.connect_codex(self.login_url.emit)
                 if result.get("issue"):
                     return {"issue": result["issue"]}
+            if method == "connect" and args == "claude":
+                with self.subscriptions.lock:
+                    self.subscriptions.checked.pop("claude", None)
             self.usage.set_connection(args, method == "connect")
             return self.subscriptions.snapshot(self.usage.connections)
         if method == "usage":
             return self.usage.snapshot()
         if method == "subscriptions":
-            # Local captures follow collection cadence; account queries keep their own cache.
+            # Rendering follows collection cadence; account queries keep their own cache.
             return dict(
                 self.subscriptions.snapshot(self.usage.connections),
                 refresh_seconds=self.usage.config["collection"]["refresh_seconds"],

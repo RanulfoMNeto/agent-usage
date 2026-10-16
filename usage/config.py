@@ -19,7 +19,6 @@ def load_config(path=None):
     config = tomllib.loads(Path(__file__).with_name("defaults.toml").read_text(encoding="utf-8"))
     state = user_directory("state")
     config["history"] = {"database": str(state / "history.sqlite3")}
-    config["subscriptions"]["claude_file"] = str(state / "claude.json")
     if path is not None and not Path(path).is_file():
         raise FileNotFoundError(path)
     path = Path(path) if path else user_directory("config") / "config.toml"

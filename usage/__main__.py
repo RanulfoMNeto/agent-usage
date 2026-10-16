@@ -1,14 +1,12 @@
 """Agent Usage: a persistent local desktop widget."""
 
 import argparse
-import json
 import logging
 import subprocess
 import sys
 from pathlib import Path
 
 from usage.config import load_config
-from usage.subscriptions import capture_claude
 
 
 def main():
@@ -45,19 +43,14 @@ def main():
             print(install_gnome(args.config, remove=args.uninstall_gnome))
             return
         if args.capture_claude:
-            from usage.history import load_connections
-
-            if load_connections(config["history"]["database"]).get("claude") is False:
-                return
-            snapshot = capture_claude(
-                config["subscriptions"]["claude_file"], json.loads(sys.stdin.buffer.read(65537))
-            )
-            print(
-                " · ".join(
-                    f"{w['minutes'] / 60:g}h: {w['used_percent']:g}%" for w in snapshot["windows"]
-                )
-            )
+            # Quietly retire commands already loaded by an older Claude terminal.
             return
+        from usage.integration import remove_legacy_claude_statusline
+
+        try:
+            remove_legacy_claude_statusline()
+        except (OSError, ValueError):
+            logging.warning("Could not remove the legacy Claude status line.")
         from usage.desktop import run
 
         if sys.platform == "win32" and config["integrations"]["windows_shortcut"]:
@@ -69,7 +62,7 @@ def main():
                 logging.warning("Could not create the Start menu shortcut.")
         from usage.subscriptions import Subscriptions
 
-        run(config, subscriptions=Subscriptions(config["subscriptions"], config_path=args.config))
+        run(config, subscriptions=Subscriptions(config["subscriptions"]))
     except (
         OSError,
         ValueError,

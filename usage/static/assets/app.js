@@ -504,17 +504,13 @@ for (const [agent, info] of Object.entries(AGENTS)) {
 }
 const CONNECTION_MESSAGES = {
   disconnected: ['Disconnected', 'Monitoring is paused. Your agent login and collected history are kept.'],
-  not_found: ['Not installed', 'Install Codex or its official VS Code extension in this environment.'],
-  login_required: ['Not connected', 'Connect to use your ChatGPT subscription.'],
+  not_found: ['Not installed', 'Install the agent or its official VS Code extension in this environment.'],
+  login_required: ['Not connected', 'Connect to sign in with your agent subscription.'],
   unsupported_account: ['Subscription required', 'API-key accounts do not provide subscription limits.'],
   login_cancelled: ['Connection cancelled', 'No new connection was established.'],
   timeout: ['Connection timed out', 'Try connecting again.'],
   query_failed: ['Limits unavailable', 'The native account query failed.'],
-  claude_waiting: ['Waiting for usage', 'Complete a request in the Claude terminal opened by Connect.'],
-  claude_no_limits: ['No limits reported', 'Claude has supplied a snapshot without subscription limits.'],
-  claude_not_found: ['Not connected', 'Connect to open Claude Code and set up monitoring.'],
-  claude_setup_required: ['Not connected', 'Connect to open Claude Code and set up monitoring.'],
-  claude_setup_failed: ['Check Claude settings', 'Claude settings could not be read. Check file permissions and valid JSON.'],
+  unsupported_version: ['Update Claude Code', 'The installed Claude Code does not support native usage queries.'],
 };
 function connectionMessage(provider) {
   if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Connected', ''];
