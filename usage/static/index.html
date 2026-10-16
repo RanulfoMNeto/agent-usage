@@ -80,6 +80,8 @@
   <dialog id="settings" aria-labelledby="settings-title">
     <div class="panel-content">
       <form method="dialog" class="dialog-header"><h2 id="settings-title">Settings</h2><button class="icon-button" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+      <div id="visible-limits" class="setting-row" hidden><span>Limits</span><div id="limit-options" class="limit-options" role="group" aria-label="Visible limits"></div></div>
+      <div id="indicator-row" class="setting-row" hidden><label for="indicator-setting">Indicator</label><div class="select-field"><select id="indicator-setting"><option value="bar">Bar</option><option value="ring">Ring</option></select></div></div>
       <div id="limit-setting" class="setting-row" hidden><label for="limit-alert">Usage warning</label><div class="range-field"><input id="limit-alert" type="range" min="0" max="100" step="1" value="0"><output id="limit-value" for="limit-alert">Off</output></div></div>
       <div class="setting-row"><label for="view-setting">View</label><div class="select-field"><select id="view-setting"><option value="normal">Normal</option><option value="compact" title="Subscription usage only">Compact</option></select></div></div>
       <div class="setting-row"><label for="style-setting">Style</label><div class="select-field"><select id="style-setting"><option value="minimal">Default</option><option value="glass">Glassmorphism</option><option value="brutalist">Neo-Brutalism</option><option value="neumorphic">Neumorphism</option><option value="swiss">Swiss Design</option></select></div></div>

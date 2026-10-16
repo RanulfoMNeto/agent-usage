@@ -22,7 +22,7 @@ let heatmapSignature = '', buckets = new Map(), bucketId = null;
 const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 1 } };
 let agentFilter = 'all', promptId = null;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
-const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '' };
+const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '', indicator: 'bar', hiddenLimits: [] };
 let sources = null;
 const pending = new Map();
 let sequence = 0;
@@ -58,6 +58,7 @@ function applyTheme() {
   $('theme-toggle').setAttribute('aria-label', label); $('theme-toggle').title = label;
   document.documentElement.dataset.style = preferences.style;
   document.documentElement.dataset.view = preferences.view;
+  document.documentElement.dataset.indicator = preferences.indicator;
 }
 
 function savePreferences() {
@@ -450,16 +451,35 @@ function renderActivity() {
   }
 }
 
-function quotaCard(provider, item, multipleBuckets) {
-  const card = el('article', undefined, 'quota-card'); card.dataset.state = provider.status; card.dataset.agent = provider.agent;
-  const minutes = item.minutes;
-  const period = minutes === 10080 ? 'Weekly limit' : minutes === 1440 ? 'Daily limit'
-    : minutes % 60 === 0 ? minutes / 60 + '-hour limit' : minutes + '-minute limit';
-  const label = (multipleBuckets ? item.name + ' · ' : '') + period;
+function limitLabel(minutes) {
+  return minutes === 10080 ? 'Weekly' : minutes === 1440 ? 'Daily'
+    : minutes % 60 === 0 ? minutes / 60 + '-hour' : minutes + '-minute';
+}
+
+function renderLimitOptions() {
+  const durations = [...new Set(activeProviders().flatMap(p => p.windows.map(w => w.minutes)))].sort((a, b) => b - a);
+  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length;
+  const options = $('limit-options'), signature = JSON.stringify([durations, preferences.hiddenLimits]);
+  if (options.dataset.signature === signature) return;
+  options.dataset.signature = signature;
+  options.replaceChildren(...durations.map(minutes => {
+    const label = el('label'), input = el('input');
+    input.type = 'checkbox'; input.value = minutes; input.checked = !preferences.hiddenLimits.includes(minutes);
+    label.append(input, el('span', limitLabel(minutes))); return label;
+  }));
+}
+
+function quotaIndicator(provider, item, multipleBuckets) {
+  const node = el('div', undefined, 'quota-limit'); node.dataset.minutes = item.minutes;
+  const label = (multipleBuckets ? item.name + ' · ' : '') + limitLabel(item.minutes) + ' limit';
   const remaining = Math.max(0, Math.ceil((item.resets_at - Date.now() / 1000) / 60));
   const countdown = remaining >= 1440 ? Math.floor(remaining / 1440) + 'd ' + Math.floor(remaining % 1440 / 60) + 'h'
     : remaining >= 60 ? Math.floor(remaining / 60) + 'h ' + remaining % 60 + 'm' : remaining + 'm';
   const gauge = el('div', undefined, 'quota-gauge');
+  gauge.setAttribute('role', 'meter'); gauge.setAttribute('aria-label', provider.agent + ' · ' + label);
+  gauge.setAttribute('aria-valuemin', '0'); gauge.setAttribute('aria-valuemax', '100');
+  gauge.setAttribute('aria-valuenow', item.used_percent); gauge.setAttribute('aria-valuetext', percent.format(item.used_percent) + '% used');
+  gauge.style.setProperty('--used', item.used_percent + '%');
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 100 100'); svg.setAttribute('aria-hidden', 'true');
   for (const name of ['track', 'fill']) {
     const circle = document.createElementNS(svg.namespaceURI, 'circle');
@@ -470,16 +490,24 @@ function quotaCard(provider, item, multipleBuckets) {
   const value = el('div', undefined, 'quota-value');
   value.append(el('strong', percent.format(item.used_percent) + '%', 'quota-percent'), el('span', 'used', 'quota-unit'));
   gauge.append(svg, value);
-  const brand = el('p', undefined, 'quota-brand'); brand.append(agentIcon(provider.agent), el('span', provider.agent.replace(' Code', '')));
   const reset = el('time', 'Resets in ' + countdown, 'quota-reset'); reset.dateTime = new Date(item.resets_at * 1000).toISOString();
   reset.title = 'Resets ' + new Date(item.resets_at * 1000).toLocaleString('en-US', { timeZoneName: 'short' });
-  const info = el('div', undefined, 'quota-info'); info.append(brand, el('p', label, 'quota-label'), reset);
-  if (provider.status === 'stale') info.append(el('span', 'Outdated', 'quota-stale'));
+  const info = el('div', undefined, 'quota-info'); info.append(el('p', label, 'quota-label'), reset);
   if (preferences.limitAlert && provider.status === 'available' && item.used_percent >= preferences.limitAlert) {
-    card.dataset.warning = 'true';
+    node.dataset.warning = 'true';
     info.append(el('span', item.used_percent >= 100 ? 'Limit reached' : 'Near limit', 'quota-warning'));
   }
-  card.append(gauge, info);
+  node.append(gauge, info); return node;
+}
+
+function quotaCard(provider, windows) {
+  const card = el('article', undefined, 'quota-card'); card.dataset.state = provider.status; card.dataset.agent = provider.agent;
+  const brand = el('p', undefined, 'quota-brand'); brand.append(agentIcon(provider.agent), el('span', provider.agent.replace(' Code', '')));
+  if (provider.status === 'stale') brand.append(el('span', 'Outdated', 'quota-stale'));
+  const limits = el('div', undefined, 'quota-limits');
+  const multipleBuckets = new Set(windows.map(item => item.name)).size > 1;
+  limits.append(...windows.map(item => quotaIndicator(provider, item, multipleBuckets)));
+  card.append(brand, limits);
   card.title = 'Last reported ' + (valid(provider.updated_at) ? stamp(provider.updated_at) : 'unknown');
   return card;
 }
@@ -558,15 +586,16 @@ function renderSubscriptions() {
   const visible = activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter);
   const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent))
     .map(agent => providers.find(p => p.agent === agent) || { agent }) : [];
-  const signature = JSON.stringify([visible, missing, preferences.limitAlert, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([visible, missing, preferences.limitAlert, preferences.hiddenLimits, Math.floor(Date.now() / 60000)]);
+  renderLimitOptions();
   const hasLimits = activeProviders().length > 0;
   $('limit-setting').hidden = !hasLimits;
-  $('subscriptions-section').hidden = !visible.length && !missing.length;
+  $('subscriptions-section').hidden = !visible.some(p => p.windows.some(w => !preferences.hiddenLimits.includes(w.minutes))) && !missing.length;
   if (signature === quotaSignature) return;
   quotaSignature = signature;
   $('subscriptions').replaceChildren(...visible.flatMap(provider => {
-    const multipleBuckets = new Set(provider.windows.map(item => item.name)).size > 1;
-    return provider.windows.map(item => quotaCard(provider, item, multipleBuckets));
+    const windows = provider.windows.filter(item => !preferences.hiddenLimits.includes(item.minutes));
+    return windows.length ? [quotaCard(provider, windows)] : [];
   }));
   for (const provider of missing) {
     const { agent } = provider;
@@ -578,7 +607,6 @@ function renderSubscriptions() {
     row.title = hint;
     $('subscriptions').append(row);
   }
-  $('subscriptions').dataset.cards = $('subscriptions').querySelectorAll('.quota-card').length;
 }
 
 function render() {
@@ -621,6 +649,7 @@ function changePeriod(value) {
 
 async function openSettings() {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
+  $('indicator-setting').value = preferences.indicator;
   $('view-setting').value = preferences.view; $('style-setting').value = preferences.style; $('pinned-setting').checked = preferences.pinned;
   $('settings').showModal(); reportSize();
   try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
@@ -668,9 +697,16 @@ async function chooseProject(reset = false) {
 }
 $('project').addEventListener('click', () => chooseProject());
 $('project-reset').addEventListener('click', () => chooseProject(true));
-for (const key of ['view', 'style']) $(key + '-setting').addEventListener('change', () => {
+for (const key of ['view', 'style', 'indicator']) $(key + '-setting').addEventListener('change', () => {
   preferences[key] = $(key + '-setting').value;
   applyTheme(); render(); savePreferences(); reportSize();
+});
+$('limit-options').addEventListener('change', event => {
+  const input = event.target;
+  if (input.type !== 'checkbox') return;
+  preferences.hiddenLimits = preferences.hiddenLimits.filter(value => value !== Number(input.value));
+  if (!input.checked) preferences.hiddenLimits.push(Number(input.value));
+  savePreferences(); renderSubscriptions(); reportSize();
 });
 $('pinned-setting').addEventListener('change', () => { preferences.pinned = $('pinned-setting').checked; savePreferences(); });
 document.querySelector('.widget').addEventListener('pointerdown', event => {
@@ -755,6 +791,8 @@ native('preferences').then(saved => {
   if (Number.isInteger(saved.limitAlert) && saved.limitAlert >= 0 && saved.limitAlert <= 100) preferences.limitAlert = saved.limitAlert;
   if (['normal', 'compact'].includes(saved.view)) preferences.view = saved.view;
   if (['glass', 'minimal', 'brutalist', 'neumorphic', 'swiss'].includes(saved.style)) preferences.style = saved.style;
+  if (['bar', 'ring'].includes(saved.indicator)) preferences.indicator = saved.indicator;
+  if (Array.isArray(saved.hiddenLimits)) preferences.hiddenLimits = [...new Set(saved.hiddenLimits.filter(value => Number.isInteger(value) && value > 0))];
   preferences.pinned = saved.pinned === true;
   if (typeof saved.project === 'string' && saved.project !== '?' && saved.project.length <= 4096) preferences.project = saved.project;
   $('period').value = preferences.period; applyTheme(); savePreferences();

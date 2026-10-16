@@ -44,6 +44,10 @@ content. **Compact** shows limits; **Normal** adds activity. Click a day in
 Hover previews; clicking selects. Settings controls appearance, warnings, projects
 and sources. The close button quits the app.
 
+**Settings → Limits** chooses which reported limits to show for each agent;
+**Indicator** switches between bars (default) and rings. Limits share one card
+per agent. These preferences persist locally and do not affect collection.
+
 ## See it in action
 
 <p align="center">

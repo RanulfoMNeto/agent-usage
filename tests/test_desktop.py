@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import Future
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -71,6 +72,120 @@ class DesktopTests(unittest.TestCase):
         self.bridge.close()
         self.window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    @contextmanager
+    def renderer(self, subscriptions):
+        with patch("usage.desktop.user_directory", return_value=self.root):
+            window = Widget({"width": 400, "compact_width": 300}, self.usage, subscriptions)
+
+        def evaluate(expression):
+            result = []
+            window.page().runJavaScript("JSON.stringify(" + expression + ")", result.append)
+            deadline = time.monotonic() + 10
+            while not result and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertTrue(result and result[0], "Renderer did not respond: " + expression)
+            return json.loads(result[0])
+
+        def wait_for(expression):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if evaluate(expression):
+                    return
+                QTest.qWait(20)
+            self.fail("Renderer did not settle: " + expression)
+
+        try:
+            window.show()
+            wait_for("typeof data!=='undefined' && !!data && subscriptionsLoaded")
+            yield window, evaluate, wait_for
+        finally:
+            window.close()
+            window.bridge.close()
+            window.page().deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_limit_preferences_preserve_collection_and_survive_restart(self):
+        now = time.time()
+        self.usage.snapshot.return_value = {
+            "rows": [{"id": "prompt", "agent": "Codex", "start": now, "tokens": 123}],
+            "warnings": [],
+        }
+        subscriptions = Mock()
+        subscriptions.snapshot.return_value = {
+            "providers": [
+                {
+                    "agent": agent,
+                    "status": "available",
+                    "updated_at": now,
+                    "windows": [
+                        {
+                            "name": agent,
+                            "minutes": minutes,
+                            "resets_at": now + 3600,
+                            "used_percent": used,
+                        }
+                        for minutes, used in limits
+                    ],
+                }
+                for agent, limits in (
+                    ("Codex", [(10080, 56)]),
+                    ("Claude Code", [(300, 0), (10080, 3)]),
+                )
+            ]
+        }
+        with self.renderer(subscriptions) as (window, evaluate, wait_for):
+            self.assertEqual(evaluate("preferences.indicator"), "bar")
+            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 2)
+            self.assertEqual(evaluate("document.querySelectorAll('[role=meter]').length"), 3)
+            self.assertEqual(
+                evaluate("[...$('limit-options').querySelectorAll('input')].map(n=>n.value)"),
+                ["10080", "300"],
+            )
+            window.page().runJavaScript(
+                "$('limit-options').querySelector('[value=\"300\"]').click()"
+            )
+            wait_for("document.querySelectorAll('[role=meter]').length===2")
+            self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
+            self.assertEqual(evaluate("providers[1].windows.length"), 2)
+            self.assertEqual(evaluate("selected().length"), 1)
+            window.page().runJavaScript(
+                "$('indicator-setting').value='ring';"
+                "$('indicator-setting').dispatchEvent(new Event('change'))"
+            )
+            wait_for("document.documentElement.dataset.indicator==='ring'")
+            self.assertNotEqual(
+                evaluate("getComputedStyle(document.querySelector('.quota-gauge svg')).display"),
+                "none",
+            )
+            # Temporary unavailability must not discard a display preference.
+            subscriptions.snapshot.return_value["providers"][1]["windows"] = []
+            wait_for("!$('limit-options').querySelector('[value=\"300\"]')")
+            self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
+            subscriptions.snapshot.return_value["providers"][1]["windows"] = [
+                {"name": "Claude", "minutes": 300, "resets_at": now + 3600, "used_percent": 0}
+            ]
+            wait_for("!!$('limit-options').querySelector('[value=\"300\"]')")
+            self.assertFalse(
+                evaluate("$('limit-options').querySelector('[value=\"300\"]').checked")
+            )
+            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 1)
+            window.page().runJavaScript(
+                "$('limit-options').querySelector('[value=\"10080\"]').click()"
+            )
+            wait_for("$('subscriptions-section').hidden")
+            self.assertFalse(evaluate("$('activity').hidden"))
+            window.page().runJavaScript(
+                "$('limit-options').querySelector('[value=\"10080\"]').click()"
+            )
+            wait_for("!$('subscriptions-section').hidden")
+            wait_for("pending.size===0")
+        with self.renderer(subscriptions) as (_, evaluate, __):
+            self.assertEqual(evaluate("preferences.indicator"), "ring")
+            self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
+            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 1)
 
     def test_only_packaged_assets_and_channel_are_accessible(self):
         interceptor = LocalOnly()
