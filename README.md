@@ -57,41 +57,37 @@ Compact view shows subscription limits only.*
 
 ## Connect your agents
 
-Open **Settings → Agents**. Local history is discovered automatically;
-account limits use the native interfaces below. Opening the widget never changes
-Claude settings or starts a login.
+Open **Settings → Agents**. History is discovered locally; subscription limits
+are queried through the installed agents every 60 seconds by default. No model
+request or open terminal is needed to keep limits current.
 
-| Agent | Connection | Limits |
+| Agent | Connect | Limits |
 | --- | --- | --- |
-| Codex | **Connect** reuses your ChatGPT login or opens the official sign-in page | Queried directly through Codex |
-| Claude Code | **Connect** sets up capture and opens Claude in a terminal | Reported after a response in that terminal |
+| Codex | Reuses your ChatGPT login or opens the official sign-in page | Native account interface |
+| Claude Code | Opens the native terminal for sign-in if needed; you can close it afterward | Native usage control request |
 
 Both agents are detected on `PATH`, in their standard installation, or inside
 their official VS Code, VS Code Insiders or Cursor extension. Each agent handles
-its own sign-in and credentials; the widget does not read or store tokens.
-Codex sign-in can be cancelled in the widget.
-API-key accounts do not supply subscription limits. Windows and WSL are separate
-environments. Custom executables can be set with `subscriptions.codex_command` or
-`subscriptions.claude_command`.
-[Native account interface](https://learn.chatgpt.com/docs/app-server).
+its own credentials; the widget does not read or store tokens. No login starts
+on its own. API-key accounts do not provide subscription quotas. Windows and WSL
+are separate environments. Custom executables can be set with
+`subscriptions.codex_command` and `subscriptions.claude_command`.
 
-**Connect** opens Claude in a separate terminal, using the installed executable.
-Sign in there if needed and complete a request with your subscription. The widget
-shows **Waiting for usage** until native limits arrive. It never sends a prompt
-on your behalf. VS Code chat alone still does not supply these snapshots; closing
-the terminal can leave an outdated reading.
-[Native status-line interface](https://code.claude.com/docs/en/statusline).
+Claude's `get_usage` control request is the **experimental** interface used by its
+VS Code extension, verified with Claude Code **2.1.301**. It may change between
+versions. Unsupported versions or failed queries show an unavailable state;
+old snapshots are never presented as a successful refresh. The widget sends
+control requests only, with tools, hooks and session persistence disabled.
+[Codex account interface](https://learn.chatgpt.com/docs/app-server) ·
+[Claude native CLI](https://code.claude.com/docs/en/cli-reference).
 
-**Disconnect** pauses new history collection and limit monitoring for that agent,
-including Claude capture. The choice persists across restarts. It keeps the agent's
-login, open sessions and collected history. Reconnecting resumes collection from
-available native files, including activity recorded while monitoring was paused.
+**Disconnect** pauses new history collection and account queries. The choice
+persists across restarts; login, open sessions and collected history are kept.
+Reconnecting also collects activity recorded while monitoring was paused.
 
-Claude setup preserves other settings and backs up the previous file beside
-`settings.json`. Replacing another status line requires confirmation. Earlier
-Agent Usage commands are repaired by the same setup action; no command copying
-or manual JSON editing is needed. After moving the widget, use this action again.
-Capture retains only quota fields. A quota indicator appears only when actual usage data has arrived.
+Earlier Agent Usage status-line capture is removed automatically on startup.
+A backed-up custom status line is restored when available; other Claude settings
+and backups are preserved. The old `claude.json` snapshot is no longer used.
 
 ## Understand the data
 
@@ -198,8 +194,8 @@ This stops future shortcut updates; an existing shortcut is retained.
 
 To update, replace the portable app or pull the source and rerun the locked
 command. State stays outside the installation. To uninstall, remove the GNOME
-integration if enabled, remove the Claude capture command from its settings,
-and delete the application folder and Windows Start menu shortcut. Delete the
+integration if enabled, and delete the application folder and Windows Start menu
+shortcut. Delete the
 state directory separately only if you want to erase the archive.
 
 ## Development and support
