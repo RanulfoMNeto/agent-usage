@@ -14,15 +14,15 @@ const confirmed = row => row.status === 'completed' && row.duration_exact && val
 const stamp = value => new Date(value * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const color = name => getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim();
 const charts = {};
-const AGENTS = { Codex: { icon: 'chatgpt.svg', color: '--codex' }, 'Claude Code': { icon: 'claude.svg', color: '--claude' } };
+const AGENTS = { Codex: { id: 'codex', icon: 'chatgpt.svg', color: '--codex' }, 'Claude Code': { id: 'claude', icon: 'claude.svg', color: '--claude' } };
 let chartSignature = '';
 let data = null, providers = [], failed = false, subscriptionsLoaded = false, quotaSignature = '';
 let activitySignature = '';
 let heatmapSignature = '', buckets = new Map(), bucketId = null;
-const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 60 } };
+const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 1 } };
 let agentFilter = 'all', promptId = null;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
-const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '' };
+const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '', indicator: 'bar', hiddenLimits: [] };
 let sources = null;
 const pending = new Map();
 let sequence = 0;
@@ -58,6 +58,7 @@ function applyTheme() {
   $('theme-toggle').setAttribute('aria-label', label); $('theme-toggle').title = label;
   document.documentElement.dataset.style = preferences.style;
   document.documentElement.dataset.view = preferences.view;
+  document.documentElement.dataset.indicator = preferences.indicator;
 }
 
 function savePreferences() {
@@ -97,12 +98,6 @@ function weeklyWindows() {
     return item ? [{ agent: provider.agent, start: item.resets_at - item.minutes * 60, end: item.resets_at }] : [];
   });
 }
-
-function weeklyRange() {
-  const windows = weeklyWindows();
-  return windows.length ? { start: Math.min(...windows.map(w => w.start)), end: Math.max(...windows.map(w => w.end)) } : null;
-}
-
 
 function agentIcon(agent) {
   const img = el('img', undefined, 'agent-icon'); img.src = 'assets/' + AGENTS[agent].icon; img.alt = ''; img.width = 18; img.height = 18;
@@ -174,8 +169,8 @@ function shiftDay(date, offset) {
   const next = new Date(date); next.setDate(next.getDate() + offset); return next;
 }
 
-function bucketKey(start) {
-  return dayKey(new Date(start * 1000));
+function bucketKey(start, agent = '') {
+  return (agent ? agent + ':' : '') + dayKey(new Date(start * 1000));
 }
 
 function bucketSummary(bucket) {
@@ -185,17 +180,27 @@ function bucketSummary(bucket) {
 
 function hideHeatmapTooltip() {
   $('heatmap-tooltip').hidden = true;
-  $('heatmap-grid').querySelector('[aria-describedby]')?.removeAttribute('aria-describedby');
+  $('heatmaps').querySelector('[aria-describedby]')?.removeAttribute('aria-describedby');
 }
 
 function showHeatmapTooltip(cell) {
   const bucket = buckets.get(cell?.dataset.key);
-  if (!bucket || cell.disabled) return;
   hideHeatmapTooltip();
+  if (!bucket || cell.disabled) return;
   const popup = $('heatmap-tooltip');
   popup.replaceChildren(el('p', bucket.label, 'tooltip-date'));
   if (bucket.prompts) popup.append(el('strong', bucket.known ? compact.format(bucket.tokens) + ' tokens' : 'Tokens unavailable'));
   popup.append(el('p', bucketSummary(bucket), 'tooltip-summary'));
+  if (!bucket.agent && agentFilter === 'all') {
+    for (const agent of [...new Set(bucket.rows.map(row => row.agent))]) {
+      const rows = bucket.rows.filter(row => row.agent === agent), known = rows.filter(row => valid(row.tokens));
+      const detail = el('p', undefined, 'tooltip-agent');
+      detail.append(agentIcon(agent), el('span', agent.replace(' Code', '') + ' · '
+        + (known.length ? compact.format(total(known, 'tokens')) + ' tokens' : 'Tokens unavailable')
+        + (known.length < rows.length ? ' · ' + known.length + '/' + rows.length + ' prompts' : '')));
+      popup.append(detail);
+    }
+  }
   popup.hidden = false;
   cell.setAttribute('aria-describedby', popup.id);
   const rect = cell.getBoundingClientRect(), box = popup.getBoundingClientRect();
@@ -203,90 +208,109 @@ function showHeatmapTooltip(cell) {
   popup.style.top = (rect.top >= box.height + 16 ? rect.top - box.height - 10 : rect.bottom + 10) + 'px';
 }
 
-function renderHeatmap(rows, key) {
+function renderHeatmaps(rows) {
   const period = $('period').value, weekly = period === 'weekly', now = new Date();
-  const cycle = weekly ? weeklyRange() : null, strip = weekly;
+  const cycles = weekly ? weeklyWindows() : [{ agent: agentFilter }];
   const today = new Date(now); today.setHours(0, 0, 0, 0);
-  const signature = JSON.stringify([period, agentFilter, cycle, dayKey(today), rows.map(row => [row.id, row.start, row.tokens])]);
-  const grid = $('heatmap-grid'), scroller = $('heatmap-scroll');
+  const signature = JSON.stringify([period, cycles, dayKey(today), rows]);
+  const host = $('heatmaps');
   if (signature !== heatmapSignature) {
-    const previousMode = $('heatmap').dataset.period;
-    const atEnd = scroller.scrollWidth - scroller.scrollLeft - scroller.clientWidth < 4;
-    const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.key : null;
-    const hovered = grid.querySelector('[aria-describedby]')?.dataset.key;
-    heatmapSignature = signature;
-    $('heatmap').dataset.period = period;
-    $('heatmap').dataset.layout = strip ? 'days' : 'weeks';
-    $('heatmap').dataset.agent = agentFilter;
+    const previousMode = host.dataset.period;
+    const scroller = host.querySelector('.heatmap-scroll');
+    const scrollLeft = scroller?.scrollLeft || 0;
+    const atEnd = !scroller || scroller.scrollWidth - scrollLeft - scroller.clientWidth < 4;
+    const focused = host.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+    const hovered = host.querySelector('[aria-describedby]')?.dataset.key;
+    heatmapSignature = signature; host.dataset.period = period;
     buckets = new Map();
     for (const row of rows) {
-      const id = bucketKey(row.start);
-      if (!buckets.has(id)) buckets.set(id, { prompts: 0, known: 0, missing: 0, tokens: 0 });
-      const bucket = buckets.get(id); bucket.prompts++;
+      const id = bucketKey(row.start, weekly ? row.agent : '');
+      if (!buckets.has(id)) buckets.set(id, { rows: [], prompts: 0, known: 0, missing: 0, tokens: 0 });
+      const bucket = buckets.get(id); bucket.prompts++; bucket.rows.push(row);
       if (valid(row.tokens)) { bucket.tokens += row.tokens; bucket.known++; }
       else bucket.missing++;
     }
-    const max = Array.from(buckets.values()).reduce((value, bucket) => Math.max(value, bucket.tokens), 1);
-    const monday = shiftDay(today, -(today.getDay() + 6) % 7);
-    let start = cycle ? new Date(cycle.start * 1000) : shiftDay(monday, -21 * 7);
-    start.setHours(0, 0, 0, 0);
-    if (!cycle && rows.length) {
-      const first = new Date(rows.reduce((value, row) => Math.min(value, row.start), Infinity) * 1000); first.setHours(0, 0, 0, 0);
-      if (first < start) start = shiftDay(first, -(first.getDay() + 6) % 7);
-    }
-    const end = cycle ? new Date((cycle.end - 1) * 1000) : shiftDay(monday, 6);
-    const dates = [];
-    for (let day = start; day <= end; day = shiftDay(day, 1)) dates.push(day);
-    const columns = strip ? dates.length : dates.length / 7;
-    $('heatmap').style.setProperty('--rows', strip ? 1 : 7);
-    grid.style.setProperty('--columns', columns);
-    $('heatmap-axis').style.setProperty('--columns', columns);
-    $('heatmap-labels').replaceChildren(...(strip ? [] : ['M', '', 'W', '', 'F', '', 'S'].map(label => el('span', label))));
-    const axis = [];
-    if (strip) {
-      for (const day of dates) axis.push(el('span', day.toLocaleDateString('en-US', { weekday: 'short' }) + '\n' + day.getDate()));
-    } else {
-      let lastColumn = -3;
-      for (let index = 0; index < dates.length; index++) {
-        const day = dates[index], column = Math.floor(index / 7);
-        if (cycle && (day / 1000 < cycle.start || day / 1000 >= cycle.end)) continue;
-        if ((!axis.length || day.getDate() === 1) && column - lastColumn >= 3) {
-          const label = el('span', day.toLocaleDateString('en-US', { month: 'short' }));
-          label.style.gridColumn = column + 1; axis.push(label); lastColumn = column;
+    // Both strips use the same token scale, while each retains its own reset window.
+    const max = [...buckets.values()].reduce((value, bucket) => Math.max(value, bucket.tokens), 1);
+    const maps = cycles.map(cycle => {
+      const map = $('heatmap-template').content.firstElementChild.cloneNode(true);
+      const part = name => map.querySelector('.heatmap-' + name);
+      map.dataset.layout = weekly ? 'days' : 'weeks'; map.dataset.agent = cycle.agent;
+      if (weekly) {
+        part('heading').hidden = false;
+        part('heading').append(agentIcon(cycle.agent), el('span', cycle.agent.replace(' Code', '')));
+        part('grid').setAttribute('aria-label', cycle.agent + ' current weekly cycle. Recorded tokens per day.');
+      }
+      const monday = shiftDay(today, -(today.getDay() + 6) % 7);
+      let start = weekly ? new Date(cycle.start * 1000) : shiftDay(monday, -21 * 7);
+      start.setHours(0, 0, 0, 0);
+      if (!weekly && rows.length) {
+        const first = new Date(rows.reduce((first, row) => Math.min(first, row.start), Infinity) * 1000); first.setHours(0, 0, 0, 0);
+        if (first < start) start = shiftDay(first, -(first.getDay() + 6) % 7);
+      }
+      const end = weekly ? new Date((cycle.end - 1) * 1000) : shiftDay(monday, 6);
+      const dates = [];
+      for (let day = start; day <= end; day = shiftDay(day, 1)) dates.push(day);
+      map.style.setProperty('--rows', weekly ? 1 : 7);
+      map.style.setProperty('--columns', weekly ? dates.length : dates.length / 7);
+      part('labels').replaceChildren(...(weekly ? [] : ['M', '', 'W', '', 'F', '', 'S'].map(label => el('span', label))));
+      const axis = [];
+      if (weekly) {
+        for (const day of dates) axis.push(el('span', day.toLocaleDateString('en-US', { weekday: 'short' }) + '\n' + day.getDate()));
+      } else {
+        let lastColumn = -3;
+        for (const [index, day] of dates.entries()) {
+          const column = Math.floor(index / 7);
+          if ((!axis.length || day.getDate() === 1) && column - lastColumn >= 3) {
+            const label = el('span', day.toLocaleDateString('en-US', { month: 'short' }));
+            label.style.gridColumn = column + 1; axis.push(label); lastColumn = column;
+          }
         }
       }
+      part('axis').replaceChildren(...axis);
+      for (const day of dates) {
+        const id = bucketKey(day / 1000, weekly ? cycle.agent : '');
+        const bucket = buckets.get(id) || { rows: [], prompts: 0, known: 0, missing: 0, tokens: 0 };
+        bucket.agent = weekly ? cycle.agent : null;
+        bucket.label = (weekly ? cycle.agent.replace(' Code', '') + ' · ' : '')
+          + day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        bucket.disabled = day > today;
+        buckets.set(id, bucket);
+        const cell = el('button', undefined, 'heat-cell'); cell.type = 'button'; cell.tabIndex = -1; cell.dataset.key = id;
+        cell.dataset.level = bucket.tokens ? Math.ceil(bucket.tokens / max * 4) : 0;
+        cell.dataset.unknown = String(bucket.prompts > 0 && !bucket.known);
+        cell.disabled = bucket.disabled;
+        cell.setAttribute('aria-label', bucket.label + '. ' + (bucket.known ? count(bucket.tokens) + ' recorded tokens. ' : '') + bucketSummary(bucket));
+        part('grid').append(cell);
+      }
+      const format = date => date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(weekly ? {} : { year: 'numeric' }) });
+      part('range').textContent = format(weekly ? new Date(cycle.start * 1000) : start) + ' – '
+        + format(weekly ? new Date(cycle.end * 1000) : today);
+      if (weekly) part('range').title = stamp(cycle.start) + ' – ' + stamp(cycle.end);
+      return map;
+    });
+    hideHeatmapTooltip(); heatmapObserver.disconnect(); host.replaceChildren(...maps);
+    for (const map of maps) {
+      const scroller = map.querySelector('.heatmap-scroll');
+      if (!weekly) scroller.scrollLeft = atEnd || previousMode !== period ? scroller.scrollWidth : scrollLeft;
+      heatmapObserver.observe(map.querySelector('.heatmap-grid'));
     }
-    $('heatmap-axis').replaceChildren(...axis);
-    const cells = [];
-    for (const day of dates) {
-      const id = dayKey(day);
-      const bucket = buckets.get(id) || { prompts: 0, known: 0, missing: 0, tokens: 0 };
-      bucket.label = day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-      buckets.set(id, bucket);
-      const cell = el('button', undefined, 'heat-cell'); cell.type = 'button'; cell.tabIndex = -1; cell.dataset.key = id;
-      cell.dataset.level = bucket.tokens ? Math.ceil(bucket.tokens / max * 4) : 0;
-      cell.dataset.unknown = String(bucket.prompts > 0 && !bucket.known);
-      cell.disabled = day > today;
-      cell.setAttribute('aria-label', bucket.label + '. ' + (bucket.known ? count(bucket.tokens) + ' recorded tokens. ' : '') + bucketSummary(bucket));
-      cells.push(cell);
-    }
-    hideHeatmapTooltip();
-    grid.replaceChildren(...cells);
-    const format = date => date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(weekly ? {} : { year: 'numeric' }) });
-    $('heatmap-range').textContent = format(cycle ? new Date(cycle.start * 1000) : start) + ' – '
-      + format(cycle ? new Date((cycle.end - (weekly ? 0 : 1)) * 1000) : today);
-    $('heatmap-range').title = weekly ? weeklyWindows().map(w => w.agent + ': ' + stamp(w.start) + ' – ' + stamp(w.end)).join('\n') : '';
-    if (!strip && (atEnd || previousMode !== period)) scroller.scrollLeft = scroller.scrollWidth;
+    const cells = [...host.querySelectorAll('.heat-cell')];
     if (focused) cells.find(cell => cell.dataset.key === focused)?.focus({ preventScroll: true });
     if (hovered && !focused) showHeatmapTooltip(cells.find(cell => cell.dataset.key === hovered));
   }
-  let selectedCell;
-  for (const cell of grid.children) {
-    const chosen = cell.dataset.key === key;
-    cell.setAttribute('aria-pressed', String(chosen)); cell.tabIndex = chosen ? 0 : -1;
-    if (chosen) selectedCell = cell;
+  if (!buckets.has(bucketId) || buckets.get(bucketId).disabled) bucketId = null;
+  const key = bucketId || bucketKey(rows[0]?.start ?? now / 1000, weekly ? rows[0]?.agent || cycles[0].agent : '');
+  for (const grid of host.querySelectorAll('.heatmap-grid')) {
+    let selectedCell;
+    for (const cell of grid.children) {
+      const chosen = cell.dataset.key === key;
+      cell.setAttribute('aria-pressed', String(chosen)); cell.tabIndex = chosen ? 0 : -1;
+      if (chosen) selectedCell = cell;
+    }
+    if (!selectedCell) grid.querySelector('button:not(:disabled)')?.setAttribute('tabindex', '0');
   }
-  if (!selectedCell) grid.querySelector('button:not(:disabled)')?.setAttribute('tabindex', '0');
+  return key;
 }
 
 function renderHistoryChart(rows, active) {
@@ -306,7 +330,7 @@ function renderHistoryChart(rows, active) {
   if (signature === chartSignature) return;
   chartSignature = signature;
   const agents = [...new Set(rows.map(row => row.agent))];
-  const firstTime = Math.min(...rows.map(row => row.start)), lastTime = Math.max(...rows.map(row => row.start));
+  const firstTime = rows.reduce((first, row) => Math.min(first, row.start), Infinity), lastTime = Math.max(...rows.map(row => row.start));
   const datasets = agents.map(agent => {
     const tone = color(AGENTS[agent].color.slice(2));
     return {
@@ -397,24 +421,18 @@ function renderActivity() {
   if ($('activity').hidden) return;
   const rows = selected(), tokenRows = rows.filter(row => valid(row.tokens));
   const period = $('period').value, heatmap = period !== 'today';
-  const cycle = period === 'weekly' ? weeklyRange() : null;
-  const unavailable = period === 'weekly' && !cycle;
-  if (bucketId && cycle) {
-    const from = new Date(bucketId + 'T00:00:00'), to = shiftDay(from, 1);
-    if (to / 1000 <= cycle.start || from / 1000 >= cycle.end || from > new Date()) bucketId = null;
-  }
-  const key = heatmap ? bucketId || bucketKey(rows[0]?.start ?? Math.min(Date.now() / 1000, cycle?.end - 1 || Infinity)) : null;
-  const detailRows = heatmap ? rows.filter(row => bucketKey(row.start) === key) : rows;
+  const unavailable = period === 'weekly' && !weeklyWindows().length;
+  const key = heatmap && !unavailable ? renderHeatmaps(rows) : null;
+  const detailRows = heatmap ? buckets.get(key)?.rows || [] : rows;
   if (promptId !== null && !detailRows.some(row => row.id === promptId)) promptId = null;
   const active = detailRows.find(row => row.id === promptId) || detailRows[0];
   $('detail-card').hidden = unavailable;
-  $('heatmap').hidden = !heatmap || unavailable;
+  $('heatmaps').hidden = !heatmap || unavailable;
   $('bucket-inspector').hidden = !heatmap || unavailable;
   $('bucket-heading').hidden = !heatmap || unavailable;
   $('weekly-empty').hidden = !unavailable;
   $('prompt-inspector').hidden = heatmap || !active;
-  if (heatmap && !unavailable) renderHeatmap(rows, key);
-  const signature = JSON.stringify([rows, promptId, agentFilter, preferences.project, period, key, cycle]);
+  const signature = JSON.stringify([rows, promptId, agentFilter, preferences.project, period, key]);
   if (signature !== activitySignature) {
     activitySignature = signature;
     $('total-questions').textContent = unavailable ? '—' : count(rows.length);
@@ -442,24 +460,42 @@ function renderActivity() {
   if (period === 'weekly') {
     const windows = weeklyWindows();
     const missing = knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !windows.some(w => w.agent === agent));
-    const notes = [];
-    if (missing.length && !unavailable) notes.push(windows.map(w => w.agent.replace(' Code', '')).join(' + ') + ' cycle only.');
-    if (new Set(windows.map(w => w.start)).size > 1) notes.push("Each agent uses its own cycle.");
-    $('chart-coverage').hidden = !notes.length;
-    $('chart-coverage').textContent = notes.join(' ');
+    $('chart-coverage').hidden = !missing.length || unavailable;
+    $('chart-coverage').textContent = missing.map(agent => agent.replace(' Code', '')).join(', ') + ': weekly cycle unavailable.';
   }
 }
 
-function quotaCard(provider, item, multipleBuckets) {
-  const card = el('article', undefined, 'quota-card'); card.dataset.state = provider.status; card.dataset.agent = provider.agent;
-  const minutes = item.minutes;
-  const period = minutes === 10080 ? 'Weekly limit' : minutes === 1440 ? 'Daily limit'
-    : minutes % 60 === 0 ? minutes / 60 + '-hour limit' : minutes + '-minute limit';
-  const label = (multipleBuckets ? item.name + ' · ' : '') + period;
+function limitLabel(minutes) {
+  return minutes === 10080 ? 'Weekly' : minutes === 1440 ? 'Daily'
+    : minutes % 60 === 0 ? minutes / 60 + '-hour' : minutes + '-minute';
+}
+
+function renderLimitOptions() {
+  const durations = [...new Set(activeProviders().flatMap(p => p.windows.map(w => w.minutes)))].sort((a, b) => b - a);
+  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length;
+  const options = $('limit-options'), signature = JSON.stringify(durations);
+  if (options.dataset.signature !== signature) {
+    options.dataset.signature = signature;
+    options.replaceChildren(...durations.map(minutes => {
+      const label = el('label'), input = el('input');
+      input.type = 'checkbox'; input.value = minutes;
+      label.append(input, el('span', limitLabel(minutes))); return label;
+    }));
+  }
+  for (const input of options.querySelectorAll('input')) input.checked = !preferences.hiddenLimits.includes(Number(input.value));
+}
+
+function quotaIndicator(provider, item, multipleBuckets) {
+  const node = el('div', undefined, 'quota-limit'); node.dataset.minutes = item.minutes;
+  const label = (multipleBuckets ? item.name + ' · ' : '') + limitLabel(item.minutes) + ' limit';
   const remaining = Math.max(0, Math.ceil((item.resets_at - Date.now() / 1000) / 60));
   const countdown = remaining >= 1440 ? Math.floor(remaining / 1440) + 'd ' + Math.floor(remaining % 1440 / 60) + 'h'
     : remaining >= 60 ? Math.floor(remaining / 60) + 'h ' + remaining % 60 + 'm' : remaining + 'm';
   const gauge = el('div', undefined, 'quota-gauge');
+  gauge.setAttribute('role', 'meter'); gauge.setAttribute('aria-label', provider.agent + ' · ' + label);
+  gauge.setAttribute('aria-valuemin', '0'); gauge.setAttribute('aria-valuemax', '100');
+  gauge.setAttribute('aria-valuenow', item.used_percent); gauge.setAttribute('aria-valuetext', percent.format(item.used_percent) + '% used');
+  gauge.style.setProperty('--used', item.used_percent + '%');
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 100 100'); svg.setAttribute('aria-hidden', 'true');
   for (const name of ['track', 'fill']) {
     const circle = document.createElementNS(svg.namespaceURI, 'circle');
@@ -470,61 +506,129 @@ function quotaCard(provider, item, multipleBuckets) {
   const value = el('div', undefined, 'quota-value');
   value.append(el('strong', percent.format(item.used_percent) + '%', 'quota-percent'), el('span', 'used', 'quota-unit'));
   gauge.append(svg, value);
-  const brand = el('p', undefined, 'quota-brand'); brand.append(agentIcon(provider.agent), el('span', provider.agent.replace(' Code', '')));
   const reset = el('time', 'Resets in ' + countdown, 'quota-reset'); reset.dateTime = new Date(item.resets_at * 1000).toISOString();
   reset.title = 'Resets ' + new Date(item.resets_at * 1000).toLocaleString('en-US', { timeZoneName: 'short' });
-  const info = el('div', undefined, 'quota-info'); info.append(brand, el('p', label, 'quota-label'), reset);
-  if (provider.status === 'stale') info.append(el('span', 'Outdated', 'quota-stale'));
+  const info = el('div', undefined, 'quota-info'); info.append(el('p', label, 'quota-label'), reset);
   if (preferences.limitAlert && provider.status === 'available' && item.used_percent >= preferences.limitAlert) {
-    card.dataset.warning = 'true';
+    node.dataset.warning = 'true';
     info.append(el('span', item.used_percent >= 100 ? 'Limit reached' : 'Near limit', 'quota-warning'));
   }
-  card.append(gauge, info);
+  node.append(gauge, info); return node;
+}
+
+function quotaCard(provider, windows) {
+  const card = el('article', undefined, 'quota-card'); card.dataset.state = provider.status; card.dataset.agent = provider.agent;
+  const brand = el('p', undefined, 'quota-brand'); brand.append(agentIcon(provider.agent), el('span', provider.agent.replace(' Code', '')));
+  if (provider.status === 'stale') brand.append(el('span', 'Outdated', 'quota-stale'));
+  const limits = el('div', undefined, 'quota-limits');
+  const multipleBuckets = new Set(windows.map(item => item.name)).size > 1;
+  limits.append(...windows.map(item => quotaIndicator(provider, item, multipleBuckets)));
+  card.append(brand, limits);
   card.title = 'Last reported ' + (valid(provider.updated_at) ? stamp(provider.updated_at) : 'unknown');
   return card;
 }
+
+for (const [agent, info] of Object.entries(AGENTS)) {
+  const card = el('article', undefined, 'agent-card');
+  const header = el('div', undefined, 'agent-connection');
+  const identity = el('div'), label = el('span', undefined, 'source-label');
+  label.append(agentIcon(agent), el('span', agent.replace(' Code', '')));
+  const status = el('span', 'Checking…', 'caption'); status.id = info.id + '-connection'; status.setAttribute('role', 'status');
+  identity.append(label, status);
+  const action = el('button', 'Connect', 'setting-action'); action.dataset.connect = info.id;
+  header.append(identity, action);
+  const source = el('details', undefined, 'agent-source'); source.id = 'source-details-' + info.id;
+  const summary = el('summary', 'History folder');
+  const reset = el('button', 'Reset', 'text-button source-reset'); reset.dataset.default = info.id; reset.hidden = true;
+  const folder = el('button', undefined, 'source-path'); folder.id = 'source-' + info.id; folder.dataset.source = info.id; folder.disabled = true;
+  folder.setAttribute('aria-label', 'Choose ' + agent + ' session directory');
+  folder.innerHTML = '<span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg>';
+  const empty = el('p', 'No session files found', 'caption source-empty'); empty.id = 'source-empty-' + info.id; empty.hidden = true;
+  source.append(summary, reset, folder, empty); card.append(header, source); $('agent-settings').append(card);
+}
+const CONNECTION_MESSAGES = {
+  disconnected: ['Disconnected', 'Monitoring is paused. Your agent login and collected history are kept.'],
+  not_found: ['Not installed', 'Install the agent or its official VS Code extension in this environment.'],
+  login_required: ['Not connected', 'Connect to sign in with your agent subscription.'],
+  unsupported_account: ['Subscription required', 'API-key accounts do not provide subscription limits.'],
+  login_cancelled: ['Connection cancelled', 'No new connection was established.'],
+  timeout: ['Connection timed out', 'Try connecting again.'],
+  query_failed: ['Limits unavailable', 'The native account query failed.'],
+  unsupported_version: ['Update Claude Code', 'The installed Claude Code does not support native usage queries.'],
+};
+function connectionMessage(provider) {
+  if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Connected', ''];
+  return CONNECTION_MESSAGES[provider?.issue] || ['Limits unavailable', 'No current account limits were reported.'];
+}
+let connectionTask = null, cancelling = false, connectionRevision = 0;
+function renderConnections() {
+  for (const [agent, {id}] of Object.entries(AGENTS)) {
+    const provider = providers.find(p => p.agent === agent);
+    const [label, hint] = connectionMessage(provider);
+    const busy = connectionTask?.agent === id;
+    $(id + '-connection').textContent = busy ? (connectionTask.method === 'disconnect' ? 'Disconnecting…' : 'Connecting…') : subscriptionsLoaded ? label : 'Checking…';
+    $(id + '-connection').title = hint;
+    const button = document.querySelector('[data-connect="' + id + '"]');
+    const canCancel = busy && connectionTask.method === 'connect' && id === 'codex';
+    button.disabled = !!connectionTask && (!canCancel || cancelling);
+    button.textContent = canCancel ? 'Cancel' : (provider?.connected ?? !!provider?.windows?.length) ? 'Disconnect' : 'Connect';
+    button.title = provider?.connected ? 'Pause monitoring; keep login and history' : 'Start monitoring';
+  }
+}
+$('agent-settings').addEventListener('click', async event => {
+  const button = event.target.closest('[data-connect]');
+  if (!button) return;
+  const agent = button.dataset.connect;
+  settingsMessage();
+  if (connectionTask) {
+    if (agent !== 'codex' || connectionTask.agent !== agent || connectionTask.method !== 'connect') return;
+    cancelling = true; renderConnections();
+    try { await native('cancel_login', agent); } catch (error) { settingsMessage(error.message); }
+    return;
+  }
+  const provider = providers.find(p => AGENTS[p.agent]?.id === agent);
+  const method = (provider?.connected ?? !!provider?.windows?.length) ? 'disconnect' : 'connect';
+  connectionTask = {agent, method}; connectionRevision++; renderConnections();
+  try {
+    const result = await native(method, agent);
+    if (result.cancelled) return;
+    if (result.providers) { providers = result.providers; subscriptionsLoaded = true; }
+    else if (result.issue) settingsMessage(connectionMessage(result)[1]);
+  } catch (error) { settingsMessage(error.message); }
+  finally { connectionTask = null; cancelling = false; render(); }
+});
 
 function renderSubscriptions() {
   const visible = activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter);
   const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent))
     .map(agent => providers.find(p => p.agent === agent) || { agent }) : [];
-  const signature = JSON.stringify([visible, missing, preferences.limitAlert, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([visible, missing, preferences.limitAlert, preferences.hiddenLimits, Math.floor(Date.now() / 60000)]);
+  renderLimitOptions();
   const hasLimits = activeProviders().length > 0;
   $('limit-setting').hidden = !hasLimits;
-  $('subscriptions-section').hidden = !visible.length && !missing.length;
+  $('subscriptions-section').hidden = !visible.some(p => p.windows.some(w => !preferences.hiddenLimits.includes(w.minutes))) && !missing.length;
   if (signature === quotaSignature) return;
   quotaSignature = signature;
   $('subscriptions').replaceChildren(...visible.flatMap(provider => {
-    const multipleBuckets = new Set(provider.windows.map(item => item.name)).size > 1;
-    return provider.windows.map(item => quotaCard(provider, item, multipleBuckets));
+    const windows = provider.windows.filter(item => !preferences.hiddenLimits.includes(item.minutes));
+    return windows.length ? [quotaCard(provider, windows)] : [];
   }));
   for (const provider of missing) {
     const { agent } = provider;
-    const [label, hint] = {
-      not_found: ['Codex not found', 'Install the Codex CLI or its official VS Code extension.'],
-      login_required: ['Sign in required', 'Sign in to Codex with ChatGPT in this Windows or Linux environment.'],
-      unsupported_account: ['ChatGPT login required', 'This account does not provide ChatGPT subscription limits.'],
-      timeout: ['Connection timed out', 'The account query timed out. Retrying automatically.'],
-      query_failed: ['Limits unavailable', 'The native account query failed. Retrying automatically.'],
-      claude_waiting: ['Waiting for Claude CLI', 'Complete a request in Claude Code terminal mode with your subscription. The VS Code chat panel does not supply this status-line snapshot.'],
-      claude_no_limits: ['No limits reported', 'The status line is connected, but Claude has not supplied subscription limits. Complete a request using an eligible subscription account.'],
-      claude_not_found: ['Claude not detected', 'Start Claude Code in this environment, then reopen the widget to connect its status line.'],
-      claude_custom_statusline: ['Custom status line', 'Your existing Claude status line was preserved. See the README to connect its output.'],
-      claude_setup_failed: ['Setup unavailable', 'Claude settings could not be updated. Check file permissions and valid JSON, then reopen the widget.'],
-      claude_setup_disabled: ['Setup disabled', 'Automatic Claude status-line setup is disabled in the widget configuration.'],
-    }[provider.issue] || ['Limits unavailable', 'No current account limits were reported.'];
+    const [label, hint] = connectionMessage(provider);
     const row = el('div', undefined, 'quota-unavailable');
-    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), el('span', label, 'caption'));
+    const action = el('button', label, 'text-button caption');
+    action.addEventListener('click', () => openSettings());
+    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), action);
     row.title = hint;
     $('subscriptions').append(row);
   }
-  $('subscriptions').dataset.cards = $('subscriptions').querySelectorAll('.quota-card').length;
 }
 
 function render() {
-  updateAgents(); updateProjects(); renderSubscriptions(); renderActivity();
+  updateAgents(); updateProjects(); renderSubscriptions(); renderConnections(); renderActivity();
   for (const name of ['codex', 'claude']) {
-    $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0;
+    $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0 || providers.some(p => AGENTS[p.agent]?.id === name && p.issue === 'disconnected');
   }
   const warnings = preferences.view === 'compact' ? [] : data?.warnings || [];
   $('connection-status').hidden = preferences.view === 'compact' || (!failed && !warnings.length);
@@ -537,15 +641,16 @@ async function refresh(name) {
   const feed = feeds[name];
   if (feed.busy || document.hidden) return;
   feed.busy = true;
+  const revision = connectionRevision;
   try {
     const next = await native(name);
     if (!Array.isArray(next[name === 'usage' ? 'rows' : 'providers'])) throw Error('Unavailable');
     feed.seconds = next.refresh_seconds || feed.seconds;
     if (name === 'usage') { data = next; failed = false; }
-    else { providers = next.providers; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { providers = next.providers; subscriptionsLoaded = true; }
   } catch {
     if (name === 'usage') failed = true;
-    else { providers = []; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { providers = []; subscriptionsLoaded = true; }
   } finally {
     feed.busy = false;
     clearTimeout(feed.timer);
@@ -560,6 +665,7 @@ function changePeriod(value) {
 
 async function openSettings() {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
+  $('indicator-setting').value = preferences.indicator;
   $('view-setting').value = preferences.view; $('style-setting').value = preferences.style; $('pinned-setting').checked = preferences.pinned;
   $('settings').showModal(); reportSize();
   try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
@@ -582,7 +688,7 @@ function showSources(next) {
     document.querySelector('[data-default="' + name + '"]').hidden = !sources[name].override;
   }
 }
-$('source-settings').addEventListener('click', async event => {
+$('agent-settings').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
   const name = button.dataset.source || button.dataset.default;
@@ -607,9 +713,16 @@ async function chooseProject(reset = false) {
 }
 $('project').addEventListener('click', () => chooseProject());
 $('project-reset').addEventListener('click', () => chooseProject(true));
-for (const key of ['view', 'style']) $(key + '-setting').addEventListener('change', () => {
+for (const key of ['view', 'style', 'indicator']) $(key + '-setting').addEventListener('change', () => {
   preferences[key] = $(key + '-setting').value;
   applyTheme(); render(); savePreferences(); reportSize();
+});
+$('limit-options').addEventListener('change', event => {
+  const input = event.target;
+  if (input.type !== 'checkbox') return;
+  preferences.hiddenLimits = preferences.hiddenLimits.filter(value => value !== Number(input.value));
+  if (!input.checked) preferences.hiddenLimits.push(Number(input.value));
+  savePreferences(); renderSubscriptions(); reportSize();
 });
 $('pinned-setting').addEventListener('change', () => { preferences.pinned = $('pinned-setting').checked; savePreferences(); });
 document.querySelector('.widget').addEventListener('pointerdown', event => {
@@ -619,14 +732,14 @@ document.querySelector('.widget').addEventListener('pointerdown', event => {
 });
 $('widget-close').addEventListener('click', () => native('quit'));
 $('prompt').addEventListener('change', () => { promptId = $('prompt').value || null; renderActivity(); });
-$('heatmap-grid').addEventListener('mouseover', event => showHeatmapTooltip(event.target.closest('button')));
-$('heatmap-grid').addEventListener('focusin', event => showHeatmapTooltip(event.target.closest('button')));
-$('heatmap-grid').addEventListener('mouseleave', hideHeatmapTooltip);
-$('heatmap-grid').addEventListener('focusout', hideHeatmapTooltip);
-$('heatmap-scroll').addEventListener('scroll', hideHeatmapTooltip);
-new ResizeObserver(([entry]) => {
-  $('heatmap-labels').style.height = entry.contentRect.height + 'px';
-}).observe($('heatmap-grid'));
+$('heatmaps').addEventListener('mouseover', event => showHeatmapTooltip(event.target.closest('.heat-cell')));
+$('heatmaps').addEventListener('focusin', event => showHeatmapTooltip(event.target.closest('.heat-cell')));
+$('heatmaps').addEventListener('mouseleave', hideHeatmapTooltip);
+$('heatmaps').addEventListener('focusout', hideHeatmapTooltip);
+$('heatmaps').addEventListener('scroll', hideHeatmapTooltip, true);
+const heatmapObserver = new ResizeObserver(entries => {
+  for (const entry of entries) entry.target.closest('.heatmap').querySelector('.heatmap-labels').style.height = entry.contentRect.height + 'px';
+});
 let layoutRequest = '';
 function reportSize() {
   if (document.documentElement.dataset.layoutView !== preferences.view) return;
@@ -643,16 +756,18 @@ document.querySelectorAll('.panel-content').forEach(content => sizeObserver.obse
 $('settings').addEventListener('close', reportSize);
 window.addEventListener('resize', hideHeatmapTooltip);
 window.addEventListener('scroll', hideHeatmapTooltip);
-$('heatmap-grid').addEventListener('click', event => {
+$('heatmaps').addEventListener('click', event => {
   const cell = event.target.closest('button');
   if (!cell || cell.disabled) return;
   bucketId = cell.dataset.key; promptId = null;
   hideHeatmapTooltip(); renderActivity();
 });
-$('heatmap-grid').addEventListener('keydown', event => {
+$('heatmaps').addEventListener('keydown', event => {
   if (event.key === 'Escape') { hideHeatmapTooltip(); return; }
-  const cells = [...$('heatmap-grid').children], index = cells.indexOf(event.target);
-  const strip = $('heatmap').dataset.layout === 'days';
+  const grid = event.target.closest('.heatmap-grid');
+  if (!grid) return;
+  const cells = [...grid.children], index = cells.indexOf(event.target);
+  const strip = grid.closest('.heatmap').dataset.layout === 'days';
   const step = { ArrowLeft: strip ? -1 : -7, ArrowRight: strip ? 1 : 7, ArrowUp: strip ? 0 : -1, ArrowDown: strip ? 0 : 1 }[event.key];
   if (!step || index < 0) return;
   event.preventDefault();
@@ -694,6 +809,8 @@ native('preferences').then(saved => {
   if (Number.isInteger(saved.limitAlert) && saved.limitAlert >= 0 && saved.limitAlert <= 100) preferences.limitAlert = saved.limitAlert;
   if (['normal', 'compact'].includes(saved.view)) preferences.view = saved.view;
   if (['glass', 'minimal', 'brutalist', 'neumorphic', 'swiss'].includes(saved.style)) preferences.style = saved.style;
+  if (['bar', 'ring'].includes(saved.indicator)) preferences.indicator = saved.indicator;
+  if (Array.isArray(saved.hiddenLimits)) preferences.hiddenLimits = [...new Set(saved.hiddenLimits.filter(value => Number.isInteger(value) && value > 0))];
   preferences.pinned = saved.pinned === true;
   if (typeof saved.project === 'string' && saved.project !== '?' && saved.project.length <= 4096) preferences.project = saved.project;
   $('period').value = preferences.period; applyTheme(); savePreferences();

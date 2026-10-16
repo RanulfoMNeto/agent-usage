@@ -4,6 +4,8 @@ import ast
 import base64
 import json
 import os
+import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,6 +15,92 @@ from pathlib import Path
 
 BUNDLE = Path(__file__).with_name("gnome")
 UUID = "agent-usage@agent-usage.local"
+
+
+class ConnectionUnavailable(RuntimeError):
+    """An actionable connection failure without command output or private paths."""
+
+
+def claude_terminal_command(command):
+    """Prepare an argument list; never ask a shell to interpret user paths."""
+    try:
+        args = agent_command("claude", command)
+    except FileNotFoundError:
+        raise ConnectionUnavailable(
+            "Install Claude Code or its official VS Code extension."
+        ) from None
+    args = [str(Path(arg).expanduser()) if arg.startswith("~") else arg for arg in args]
+    if sys.platform == "win32":
+        return args
+    for terminal, separator in (
+        ("xdg-terminal-exec", []),
+        ("gnome-terminal", ["--"]),
+        ("konsole", ["-e"]),
+        ("x-terminal-emulator", ["-e"]),
+    ):
+        executable = shutil.which(terminal)
+        if executable:
+            return [executable, *separator, *args]
+    raise ConnectionUnavailable("No supported terminal found. Install a desktop terminal.")
+
+
+def open_claude_terminal(args):
+    """Keep the interactive session separate from the widget's lifetime."""
+    try:
+        if sys.platform == "win32":
+            return subprocess.Popen(
+                args, cwd=Path.home(), creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        from PySide6.QtCore import QProcess
+
+        started, _ = QProcess.startDetached(args[0], args[1:], str(Path.home()))
+        if started:
+            return None
+    except OSError:
+        pass
+    raise ConnectionUnavailable("Could not open the Claude terminal. Try connecting again.")
+
+
+def agent_command(agent, command):
+    """Reuse a native installation when the default command is not on PATH."""
+    if agent not in ("codex", "claude"):
+        raise ValueError("Unknown agent")
+    if command != [agent]:
+        return command
+    windows = sys.platform == "win32"
+    name = agent + (".exe" if windows else "")
+    found = shutil.which(name)
+    # Do not auto-discover a program in the current project or Downloads directory.
+    if found and Path(found).is_absolute() and Path(found).parent != Path.cwd():
+        return [found]
+    home = Path.home()
+    installed = (
+        Path(os.environ.get("LOCALAPPDATA") or home / "AppData/Local") / "Programs/OpenAI/Codex/bin"
+        if windows and agent == "codex"
+        else home / ".local/bin"
+    )
+    directory = os.environ.get("CODEX_INSTALL_DIR") if agent == "codex" else None
+    candidates = [Path(directory or installed).expanduser() / name]
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    target = ("windows" if windows else "linux") + "-" + architecture
+    prefix = "openai.chatgpt" if agent == "codex" else "anthropic.claude-code"
+    for editor in (".vscode", ".vscode-insiders", ".cursor"):
+        extensions = (home / editor / "extensions").glob(prefix + "-*")
+        for extension in sorted(
+            extensions,
+            key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
+            reverse=True,
+        ):
+            candidates.append(
+                extension / "bin" / target / name
+                if agent == "codex"
+                else extension / "resources/native-binary" / name
+            )
+    for candidate in candidates:
+        if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
+            return [str(candidate)]
+    raise FileNotFoundError("Agent executable unavailable")
 
 
 def command(*args):
@@ -32,27 +120,15 @@ def launch_command(config=None):
     return args
 
 
-def claude_command(config=None):
-    """Quote once for Claude's shell; Windows supports both Git Bash and PowerShell."""
-    args = [Path(arg).as_posix() for arg in launch_command(config)] + ["--capture-claude"]
-    if sys.platform == "win32":
-        quoted = " ".join("'" + arg.replace("'", "''") + "'" for arg in args)
-        script = (
-            "# Agent Usage status line\n"
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "[Console]::In.ReadToEnd() | & " + quoted + "; exit $LASTEXITCODE"
-        )
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
-    return shlex.join(args)
-
-
 def owns_claude_command(command):
     """Recognize our generated commands, including the previous manual installation."""
     if not isinstance(command, str):
         return False
     try:
         args = shlex.split(command)
+        # Older installations wrapped the capture in a working-directory change.
+        if len(args) > 3 and args[0] == "cd" and args[2] == "&&":
+            args = args[3:]
         if args[:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"]:
             return len(args) == 5 and base64.b64decode(args[4], validate=True).decode(
                 "utf-16-le"
@@ -71,50 +147,48 @@ def owns_claude_command(command):
         return False
 
 
-def install_claude_statusline(config=None):
-    """Install or relocate our capture command without replacing a custom status line."""
+def remove_legacy_claude_statusline():
+    """Remove only our retired capture; restore a backed-up custom status line."""
     from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 
     directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
-    if not directory.is_dir():
-        return "claude_not_found"
     path = directory / "settings.json"
+    if not path.is_file():
+        return
     lock = QLockFile(str(path) + ".agent-usage.lock")
     if not lock.tryLock(0):
         raise OSError("Claude settings are busy")
     try:
-        original = path.read_bytes() if path.exists() else None
-        settings = json.loads(original.decode("utf-8-sig")) if original is not None else {}
-        if not isinstance(settings, dict):
-            raise ValueError("Invalid Claude settings")
-        previous = settings.get("statusLine")
-        if previous is not None and (
-            not isinstance(previous, dict)
-            or previous.get("type") != "command"
-            or not owns_claude_command(previous.get("command"))
-        ):
-            return "claude_custom_statusline"
-        statusline = {**(previous or {}), "type": "command", "command": claude_command(config)}
-        if previous == statusline:
-            return "claude_waiting"
-        settings["statusLine"] = statusline
-        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        backup = path.with_name("settings.json.agent-usage.bak")
-        if original is not None and not backup.exists():
-            with backup.open("xb") as stream:
-                if os.name != "nt":
-                    os.fchmod(stream.fileno(), 0o600)
-                stream.write(original)
+        original = path.read_bytes()
+        settings = json.loads(original.decode("utf-8-sig"))
+        current = settings.get("statusLine") if isinstance(settings, dict) else None
+        if not isinstance(current, dict) or not owns_claude_command(current.get("command")):
+            return
+        settings.pop("statusLine")
+        backups = sorted(
+            directory.glob("settings.json.agent-usage*.bak"),
+            key=lambda p: p.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for backup in backups:
+            try:
+                prior = json.loads(backup.read_text(encoding="utf-8-sig")).get("statusLine")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(prior, dict) and not owns_claude_command(prior.get("command")):
+                settings["statusLine"] = prior
+                break
+            if prior is None:
+                break
+        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode()
         output = QSaveFile(str(path))
         if not output.open(QIODevice.OpenModeFlag.WriteOnly):
             raise OSError("Claude settings are not writable")
-        current = path.read_bytes() if path.exists() else None
-        if current != original or output.write(body) != len(body):
+        if path.read_bytes() != original or output.write(body) != len(body):
             output.cancelWriting()
-            raise OSError("Claude settings changed during setup")
+            raise OSError("Claude settings changed during migration")
         if not output.commit():
             raise OSError("Could not save Claude settings")
-        return "claude_waiting"
     finally:
         lock.unlock()
 

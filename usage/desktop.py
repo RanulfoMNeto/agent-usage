@@ -20,7 +20,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QIcon, QScreen
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QScreen
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -33,9 +33,14 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from .config import user_directory
 from .history import MAX_IMPORT, Usage
-from .integration import gnome_call
+from .integration import (
+    ConnectionUnavailable,
+    claude_terminal_command,
+    gnome_call,
+    open_claude_terminal,
+)
 from .readers import project_path
-from .subscriptions import Subscriptions
+from .subscriptions import Subscriptions, validate_login_url
 
 STATIC = Path(__file__).with_name("static").resolve()
 
@@ -57,6 +62,7 @@ class LocalPage(QWebEnginePage):
 class Bridge(QObject):
     reply = Signal(str, str)
     layout_changed = Signal(int, float, bool)
+    login_url = Signal(str)
 
     def __init__(self, usage, subscriptions, settings, window):
         super().__init__(window)
@@ -67,6 +73,20 @@ class Bridge(QObject):
             window,
         )
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-usage")
+        self.terminal = None
+        self.login_url.connect(self.open_login)
+
+    @Slot(str)
+    def open_login(self, url):
+        try:
+            url = validate_login_url(url)
+            if not getattr(self.window, "config", {}).get("demo") and QDesktopServices.openUrl(
+                QUrl(url)
+            ):
+                return
+        except ValueError:
+            pass
+        self.subscriptions.cancel_login()
 
     def respond(self, identifier, value):
         self.reply.emit(identifier, json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -86,6 +106,18 @@ class Bridge(QObject):
             if len(payload) > 16384:
                 raise ValueError("Oversized request")
             args = json.loads(payload)
+            if method in ("connect", "disconnect", "cancel_login"):
+                if getattr(self.window, "config", {}).get("demo"):
+                    raise ValueError("Connections are disabled in the demo")
+                if args not in ("codex", "claude"):
+                    raise ValueError("Unknown connection")
+                if method == "cancel_login":
+                    self.subscriptions.cancel_login()
+                    self.respond(identifier, {})
+                    return
+                if method == "connect" and args == "claude":
+                    terminal = claude_terminal_command(self.subscriptions.config["claude_command"])
+                    self.terminal = open_claude_terminal(terminal)
             if method == "preferences":
                 values = json.loads(self.settings.value("appearance", "{}"))
                 if getattr(self.window, "config", {}).get("demo"):
@@ -162,14 +194,30 @@ class Bridge(QObject):
                 return
             task = self.pool.submit(self.execute, method, args)
             task.add_done_callback(lambda future: self.finish(identifier, future))
+        except ConnectionUnavailable as exc:
+            self.respond(identifier, {"error": str(exc)})
         except (ValueError, TypeError, KeyError, OSError):
             self.respond(identifier, {"error": "Could not update settings."})
 
     def execute(self, method, args):
+        if method in ("connect", "disconnect"):
+            if method == "connect" and args == "codex":
+                result = self.subscriptions.connect_codex(self.login_url.emit)
+                if result.get("issue"):
+                    return {"issue": result["issue"]}
+            if method == "connect" and args == "claude":
+                with self.subscriptions.lock:
+                    self.subscriptions.checked.pop("claude", None)
+            self.usage.set_connection(args, method == "connect")
+            return self.subscriptions.snapshot(self.usage.connections)
         if method == "usage":
             return self.usage.snapshot()
         if method == "subscriptions":
-            return self.subscriptions.snapshot()
+            # Rendering follows collection cadence; account queries keep their own cache.
+            return dict(
+                self.subscriptions.snapshot(self.usage.connections),
+                refresh_seconds=self.usage.config["collection"]["refresh_seconds"],
+            )
         if method == "sources":
             return self.usage.sources()
         if method in ("choose_directory", "reset_source"):
@@ -202,6 +250,8 @@ class Bridge(QObject):
         raise ValueError("Unknown operation")
 
     def close(self):
+        if isinstance(self.subscriptions, Subscriptions):
+            self.subscriptions.cancel_login(close=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
 
 

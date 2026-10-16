@@ -2,7 +2,7 @@
 
 A local desktop widget for **Codex and Claude Code** on Linux and Windows.
 Read native session history, check subscription availability, and inspect activity
-by day or project. No API key, browser, or external collector.
+by day or project. No API key or external collector. Account sign-in opens your browser.
 
 ## Get started
 
@@ -44,6 +44,13 @@ content. **Compact** shows limits; **Normal** adds activity. Click a day in
 Hover previews; clicking selects. Settings controls appearance, warnings, projects
 and sources. The close button quits the app.
 
+**Settings → Limits** chooses which reported limits to show across agents;
+**Indicator** switches between bars (default) and rings. Limits share one card
+per agent. These preferences persist locally and do not affect collection.
+In **Both → Weekly**, each agent has its own current reset cycle. Clicking a day
+selects that agent's activity; **History** combines both, with a breakdown on hover.
+Heatmap intensity represents recorded tokens, not subscription percentages.
+
 ## See it in action
 
 <p align="center">
@@ -57,72 +64,37 @@ Compact view shows subscription limits only.*
 
 ## Connect your agents
 
-Activity is discovered automatically; subscription limits have separate requirements.
+Open **Settings → Agents**. History is discovered locally; subscription limits
+are queried through the installed agents every 60 seconds by default. No model
+request or open terminal is needed to keep limits current.
 
-| Data | Codex | Claude Code |
+| Agent | Connect | Limits |
 | --- | --- | --- |
-| Local activity | Native session files | Native project session files |
-| Subscription limits | Automatically detected Codex executable with an existing ChatGPT login | Automatically configured terminal status line |
-| VS Code | Native session files and the extension's bundled Codex executable | Activity when native session files exist; the extension alone does not supply limits |
+| Codex | Reuses your ChatGPT login or opens the official sign-in page | Native account interface |
+| Claude Code | Opens the native terminal for sign-in if needed; you can close it afterward | Native usage control request |
 
-### Codex
+Both agents are detected on `PATH`, in their standard installation, or inside
+their official VS Code, VS Code Insiders or Cursor extension. Each agent handles
+its own credentials; the widget does not read or store tokens. No login starts
+on its own. API-key accounts do not provide subscription quotas. Windows and WSL
+are separate environments. Custom executables can be set with
+`subscriptions.codex_command` and `subscriptions.claude_command`.
 
-Sign in to Codex through its official IDE extension or
-[CLI](https://learn.chatgpt.com/docs/cli). The widget automatically finds Codex on
-`PATH`, in its standard standalone installation, or bundled with VS Code,
-VS Code Insiders, or Cursor. It reuses the existing login in that environment;
-no separate CLI installation is needed when the extension's executable is found.
+Claude's `get_usage` control request is the **experimental** interface used by its
+VS Code extension, verified with Claude Code **2.1.301**. It may change between
+versions. Unsupported versions or failed queries show an unavailable state;
+old snapshots are never presented as a successful refresh. The widget sends
+control requests only, with tools, hooks and session persistence disabled.
+[Codex account interface](https://learn.chatgpt.com/docs/app-server) ·
+[Claude native CLI](https://code.claude.com/docs/en/cli-reference).
 
-Limits use the documented [`account/read` and `account/rateLimits/read`](https://learn.chatgpt.com/docs/app-server)
-operations. The widget does not read or store login tokens. Missing executables,
-missing logins, unsupported account types, and connection failures have distinct
-status messages. Queries retry automatically; API-key accounts do not supply
-ChatGPT subscription limits. WSL and Windows use separate environments.
+**Disconnect** pauses new history collection and account queries. The choice
+persists across restarts; login, open sessions and collected history are kept.
+Reconnecting also collects activity recorded while monitoring was paused.
 
-For a custom installation, set `codex_command` in the [configuration](#configuration).
-An explicit command takes precedence over detection. On Windows, use the native
-`.exe` rather than a PowerShell alias or npm script.
-
-### Claude Code
-
-The widget connects Claude's terminal status line automatically on a normal
-launch when `~/.claude` exists (`CLAUDE_CONFIG_DIR` is respected). It adds only
-`statusLine` to `settings.json`, preserves other settings, and saves the original
-file once as `settings.json.agent-usage.bak`. Reopening is safe and updates our
-command when the widget installation moves. Demo and capture commands do not
-install integrations. No credentials are read or copied.
-
-Complete a request in **Claude Code terminal mode**, signed in to the subscription.
-Eligible accounts supply `rate_limits` after a response; each window can be absent.
-The widget retains only quota fields. The VS Code **chat panel alone does not
-provide these snapshots**. Closing or leaving the terminal inactive can leave an
-old reading, shown as outdated. Automatic setup does not remove this limitation.
-[Official status-line documentation](https://code.claude.com/docs/en/statusline).
-
-The widget explains when it is waiting for the CLI, cannot configure settings,
-or detects an existing custom status line. Malformed settings and custom commands
-are left unchanged. If you already use a status-line script, pass the same input
-JSON to the capture command below inside that script, preserving its output.
-
-<details>
-<summary>Existing custom status line or manual setup</summary>
-
-Print the capture command for this installation:
-
-```sh
-uv run --locked --no-dev agent-usage --claude-config
-```
-
-For a portable build, run `./agent-usage --claude-config` on Linux or
-`.\agent-usage.exe --claude-config` in Windows PowerShell from its extracted folder.
-The command prints JSON with the correct executable path; it changes no files.
-If you use `--config PATH`, include it when generating this command too.
-
-The Windows command supports Git Bash and PowerShell, including installation
-paths containing spaces. The capture uses the console Python even when the widget
-was opened through its windowed Start-menu launcher.
-
-</details>
+Earlier Agent Usage status-line capture is removed automatically on startup.
+A backed-up custom status line is restored when available; other Claude settings
+and backups are preserved. The old `claude.json` snapshot is no longer used.
 
 ## Understand the data
 
@@ -153,8 +125,8 @@ before collection. Native log formats can change between agent versions.
 | Codex | `~/.codex/sessions/` and `~/.codex/archived_sessions/` |
 | Claude Code | `~/.claude/projects/` |
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. **Settings → Sources** changes
-the directories to read. **Project** selects a repository using the working
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. **Settings → Agents → History folder** changes
+the directory for each agent. **Project filter** selects a repository using the working
 directory recorded in sessions, including its subdirectories. Records without
 project metadata appear only in the unfiltered view.
 
@@ -169,7 +141,7 @@ offline account-limit service.
 | Linux | `$XDG_STATE_HOME/agent-usage`, normally `~/.local/state/agent-usage` |
 | Windows | `%LOCALAPPDATA%\AgentUsage` |
 
-**Sources → Export / Import** transfers the collected archive as JSON. Import
+**Settings → Export / Import** transfers the collected archive as JSON. Import
 merges records without duplicates, up to 64 MiB. Changing sources keeps collected
 history. Exports can contain private titles and paths; review them before sharing.
 To erase collected data, quit the widget and remove its state directory. Original
@@ -218,21 +190,19 @@ file. No personal configuration belongs in the repository.
 codex_command = ["/absolute/path/to/codex"]
 ```
 
-Automatic integrations can be disabled individually:
+To disable Start menu shortcut registration:
 
 ```toml
 [integrations]
 windows_shortcut = false
-claude_statusline = false
 ```
 
-Disabling setup stops future changes; it does not remove an existing shortcut or
-status line. Remove those entries separately when disconnecting the widget.
+This stops future shortcut updates; an existing shortcut is retained.
 
 To update, replace the portable app or pull the source and rerun the locked
 command. State stays outside the installation. To uninstall, remove the GNOME
-integration if enabled, remove the Claude capture command from its settings,
-and delete the application folder and Windows Start menu shortcut. Delete the
+integration if enabled, and delete the application folder and Windows Start menu
+shortcut. Delete the
 state directory separately only if you want to erase the archive.
 
 ## Development and support

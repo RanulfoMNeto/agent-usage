@@ -38,16 +38,20 @@
           <p class="totals"><strong id="total-questions">—</strong> prompts <span>·</span> <strong id="total-tokens">—</strong> tokens</p>
           <div class="select-field"><select id="period" aria-label="Activity period"><option value="today">Today</option><option value="weekly">Weekly</option><option value="all">History</option></select></div>
         </div>
-        <div id="heatmap" class="heatmap" hidden>
-          <div class="heatmap-layout">
-            <div id="heatmap-labels" class="heatmap-labels" aria-hidden="true"></div>
-            <div id="heatmap-scroll" class="heatmap-scroll">
-              <div id="heatmap-axis" class="heatmap-axis" aria-hidden="true"></div>
-              <div id="heatmap-grid" class="heatmap-grid" role="group" aria-label="Recorded tokens. Hover for totals; click for the day’s chart and totals. Use arrow keys to move between cells."></div>
+        <div id="heatmaps" hidden></div>
+        <template id="heatmap-template">
+          <section class="heatmap">
+            <p class="heatmap-heading" hidden></p>
+            <div class="heatmap-layout">
+              <div class="heatmap-labels" aria-hidden="true"></div>
+              <div class="heatmap-scroll">
+                <div class="heatmap-axis" aria-hidden="true"></div>
+                <div class="heatmap-grid" role="group" aria-label="Recorded tokens. Hover for totals; click for the day’s chart and totals. Use arrow keys to move between cells."></div>
+              </div>
             </div>
-          </div>
-          <div class="heatmap-footer"><span id="heatmap-range"></span><span class="heatmap-legend" title="Recorded tokens relative to the busiest cell in this view.">Less <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> More</span></div>
-        </div>
+            <div class="heatmap-footer"><span class="heatmap-range"></span><span class="heatmap-legend" title="Recorded tokens relative to the busiest cell in this view.">Less <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> More</span></div>
+          </section>
+        </template>
         <p id="chart-coverage" class="caption chart-coverage" hidden></p>
         <p id="weekly-empty" class="empty" hidden>Weekly reset unavailable.</p>
         <div id="detail-card" class="detail-card">
@@ -80,17 +84,15 @@
   <dialog id="settings" aria-labelledby="settings-title">
     <div class="panel-content">
       <form method="dialog" class="dialog-header"><h2 id="settings-title">Settings</h2><button class="icon-button" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+      <div id="visible-limits" class="setting-row" hidden><span>Limits</span><div id="limit-options" class="limit-options" role="group" aria-label="Visible limits"></div></div>
+      <div id="indicator-row" class="setting-row" hidden><label for="indicator-setting">Indicator</label><div class="select-field"><select id="indicator-setting"><option value="bar">Bar</option><option value="ring">Ring</option></select></div></div>
       <div id="limit-setting" class="setting-row" hidden><label for="limit-alert">Usage warning</label><div class="range-field"><input id="limit-alert" type="range" min="0" max="100" step="1" value="0"><output id="limit-value" for="limit-alert">Off</output></div></div>
       <div class="setting-row"><label for="view-setting">View</label><div class="select-field"><select id="view-setting"><option value="normal">Normal</option><option value="compact" title="Subscription usage only">Compact</option></select></div></div>
       <div class="setting-row"><label for="style-setting">Style</label><div class="select-field"><select id="style-setting"><option value="minimal">Default</option><option value="glass">Glassmorphism</option><option value="brutalist">Neo-Brutalism</option><option value="neumorphic">Neumorphism</option><option value="swiss">Swiss Design</option></select></div></div>
       <div class="setting-row"><label for="pinned-setting">Keep on top</label><input id="pinned-setting" class="switch" type="checkbox" role="switch"></div>
-      <div class="project-setting"><div class="source-label"><label for="project">Project</label><button id="project-reset" class="text-button" hidden>Reset</button></div><button id="project" class="source-path" aria-label="Choose project directory"><span>All projects</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button></div>
-      <details id="source-settings" class="source-settings">
-        <summary>Sources<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></summary>
-        <div class="source-entry"><div class="source-label"><img class="agent-icon" data-agent="Codex" src="assets/chatgpt.svg" alt="">Codex sessions<button data-default="codex" class="text-button" hidden>Reset</button></div><button id="source-codex" class="source-path" data-source="codex" disabled aria-label="Choose Codex session directory"><span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button><p id="source-empty-codex" class="caption source-empty" hidden>No session files found</p></div>
-        <div class="source-entry"><div class="source-label"><img class="agent-icon" data-agent="Claude Code" src="assets/claude.svg" alt="">Claude sessions<button data-default="claude" class="text-button" hidden>Reset</button></div><button id="source-claude" class="source-path" data-source="claude" disabled aria-label="Choose Claude session directory"><span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button><p id="source-empty-claude" class="caption source-empty" hidden>No session files found</p></div>
-        <div class="history-actions"><button id="export-history" class="setting-action" title="Export collected usage as JSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/></svg>Export</button><button id="import-history" class="setting-action" title="Merge a usage backup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M4 16v5h16v-5"/></svg>Import</button></div>
-      </details>
+      <div class="project-setting"><div class="source-label"><label for="project">Project filter</label><button id="project-reset" class="text-button" hidden>Reset</button></div><button id="project" class="source-path" aria-label="Choose project directory" title="Filter activity by repository. Account limits apply to the whole account."><span>All projects</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button></div>
+      <section id="agent-settings" class="agent-settings"><h2>Agents</h2></section>
+      <div class="history-actions"><button id="export-history" class="setting-action" title="Export collected usage as JSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/></svg>Export</button><button id="import-history" class="setting-action" title="Merge a usage backup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M4 16v5h16v-5"/></svg>Import</button></div>
       <p id="settings-status" class="caption" role="status" hidden></p>
     </div>
   </dialog>

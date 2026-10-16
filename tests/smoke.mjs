@@ -1,6 +1,6 @@
 // Exercise the shipped executable and Qt renderer without agent accounts or user data.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -15,10 +15,6 @@ const port = probe.address().port;
 await new Promise(done => probe.close(done));
 const environment = { ...process.env, XDG_STATE_HOME: directory, LOCALAPPDATA: directory,
   XDG_CONFIG_HOME: directory, QT_QPA_PLATFORM: 'offscreen', QTWEBENGINE_REMOTE_DEBUGGING: `127.0.0.1:${port}` };
-const capture = spawnSync(executable, ['--capture-claude'], { encoding: 'utf8', env: environment,
-  input: JSON.stringify({ rate_limits: { seven_day: { used_percentage: 42, resets_at: 2000000000 } } }) });
-assert.equal(capture.status, 0, capture.stderr);
-assert.match(capture.stdout, /42%/);
 const child = spawn(executable, ['--demo'], { cwd: directory, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = '', socket;
 for (const stream of [child.stdout, child.stderr]) stream.on('data', part => { logs = (logs + part).slice(-16000); });
@@ -68,16 +64,16 @@ try {
     await evaluate(`changePeriod('${period}');true`); await pause(150);
     assert(await evaluate(fits));
     const size = await evaluate('[innerWidth,innerHeight]');
-    await evaluate("[...$('heatmap-grid').children].find(c=>!c.disabled&&c.dataset.level==='0')?.click();true");
+    await evaluate("[...document.querySelectorAll('.heat-cell')].find(c=>!c.disabled&&c.dataset.level==='0')?.click();true");
     await pause(100); assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
     await evaluate('openSettings().then(()=>true)'); await pause(100);
     assert(await evaluate(fits)); assert(await evaluate('innerHeight') < size[1]);
     await evaluate("$('settings').close();true"); await pause(100);
     assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
   }
-  const historyHeight = await evaluate('innerHeight');
+  const historyHeight = await evaluate("document.querySelector('.widget').offsetHeight");
   await evaluate("changePeriod('today');true"); await pause(150);
-  assert(await evaluate(fits)); assert(await evaluate('innerHeight') < historyHeight);
+  assert(await evaluate(fits)); assert(await evaluate("document.querySelector('.widget').offsetHeight") < historyHeight);
   for (const view of ['normal', 'compact']) {
     await evaluate(`$('view-setting').value='${view}';$('view-setting').dispatchEvent(new Event('change'));changePeriod('all');true`);
     await pause(200); assert(await evaluate(fits));
@@ -90,7 +86,7 @@ try {
   await evaluate("setTimeout(()=>native('quit'),0);true");
   await Promise.race([once(child, 'exit'), pause(5000)]);
   assert.equal(child.exitCode, 0, logs);
-  console.log('Packaged widget: startup, quota capture, demo, charts, Settings and shutdown passed.');
+  console.log('Packaged widget: startup, demo, charts, Settings and shutdown passed.');
 } finally {
   socket?.close();
   if (child.exitCode === null) { child.kill(); await once(child, 'exit'); }

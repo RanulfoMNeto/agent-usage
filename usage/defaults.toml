@@ -7,7 +7,6 @@ compact_width = 300
 
 [integrations]
 windows_shortcut = true
-claude_statusline = true
 
 [transcripts]
 codex = "~/.codex"
@@ -16,6 +15,8 @@ show_question = true
 
 [subscriptions]
 codex_command = ["codex"]
+claude_command = ["claude"]
+# Native account queries; the interface follows the collection interval.
 refresh_seconds = 60
 timeout_seconds = 10
 stale_seconds = 300
