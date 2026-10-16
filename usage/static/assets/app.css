@@ -93,7 +93,7 @@ select:disabled { cursor: default; }
 .quota-card { min-width: 0; --accent: var(--codex); }
 .quota-card[data-agent='Claude Code'] { --accent: var(--claude); }
 .quota-limits { display: grid; gap: 14px; margin-top: 12px; }
-.quota-limit { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 12px; }
+.quota-limit { min-width: 0; }
 .quota-gauge { position: relative; width: 64px; max-width: 100%; aspect-ratio: 1; }
 .quota-gauge svg { display: block; width: 100%; height: 100%; }
 .quota-gauge circle { fill: none; stroke-width: 6.5; }
@@ -107,6 +107,15 @@ select:disabled { cursor: default; }
 .quota-reset, .quota-stale { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .quota-stale { margin: 0 0 0 auto; font-size: 9px; font-weight: 400; }
 .quota-warning { display: inline-block; margin-top: 6px; padding: 2px 7px; border-radius: 5px; font-size: 9px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); }
+:root[data-indicator='ring'] .quota-limits { grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr)); gap: 12px; }
+:root[data-indicator='ring'] .quota-limit { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+:root[data-indicator='ring'] .quota-info { overflow-wrap: anywhere; }
+:root[data-indicator='ring'] .quota-card:has(.quota-limit:only-child) { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 6px 12px; align-items: center; }
+:root[data-indicator='ring'] .quota-card:has(.quota-limit:only-child) .quota-brand { grid-column: 1; }
+:root[data-indicator='ring'] .quota-card:has(.quota-limit:only-child) .quota-limits,
+:root[data-indicator='ring'] .quota-limit:only-child { display: contents; }
+:root[data-indicator='ring'] .quota-limit:only-child .quota-gauge { grid-column: 2; grid-row: 1 / 3; }
+:root[data-indicator='ring'] .quota-limit:only-child .quota-info { grid-column: 1; text-align: left; }
 :root[data-indicator='bar'] .quota-limit { position: relative; display: block; padding-bottom: 12px; }
 :root[data-indicator='bar'] .quota-gauge { position: absolute; inset: auto 0 0; width: 100%; height: 5px; aspect-ratio: auto; border-radius: 5px; background: var(--track); }
 :root[data-indicator='bar'] .quota-gauge::before { content: ''; display: block; width: var(--used); height: 100%; border-radius: inherit; background: var(--accent); }
