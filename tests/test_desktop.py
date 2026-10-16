@@ -356,20 +356,20 @@ class DesktopTests(unittest.TestCase):
                         settings_geometry = evaluate(geometry)
                         self.assertLess(settings_geometry[1], baseline[1])
                         self.assertEqual(settings_geometry[-1], baseline[-1])
-                        window.page().runJavaScript("$('source-settings').open=true")
+                        window.page().runJavaScript("$('source-details-codex').open=true")
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertGreater(window.height(), settings_geometry[1])
-                        window.page().runJavaScript("$('source-settings').open=false")
+                        window.page().runJavaScript("$('source-details-codex').open=false")
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertEqual(evaluate(geometry), settings_geometry)
-                        window.page().runJavaScript("$('agent-connections').open=true")
+                        window.page().runJavaScript("$('source-details-claude').open=true")
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertGreater(window.height(), settings_geometry[1])
                         self.assertEqual(evaluate(geometry)[-1], settings_geometry[-1])
-                        window.page().runJavaScript("$('agent-connections').open=false")
+                        window.page().runJavaScript("$('source-details-claude').open=false")
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertEqual(evaluate(geometry), settings_geometry)
@@ -422,8 +422,8 @@ class DesktopTests(unittest.TestCase):
                 window.apply_size()
                 for script in (
                     "changePeriod('all')",
-                    "openSettings();$('source-settings').open=true",
-                    "$('source-settings').open=false",
+                    "openSettings();$('source-details-codex').open=true",
+                    "$('source-details-codex').open=false",
                     "$('settings').close()",
                     "changePeriod('today')",
                 ):
@@ -445,12 +445,12 @@ class DesktopTests(unittest.TestCase):
                 )
                 # Diagnostics must update even when the same agent still has no quota windows.
                 for agent, issue, label in (
-                    ("Codex", "not_found", "Codex not found"),
-                    ("Codex", "login_required", "Sign in required"),
-                    ("Codex", "unsupported_account", "ChatGPT login required"),
-                    ("Claude Code", "claude_waiting", "Waiting for terminal"),
+                    ("Codex", "not_found", "Not installed"),
+                    ("Codex", "login_required", "Not connected"),
+                    ("Codex", "unsupported_account", "Subscription required"),
+                    ("Claude Code", "claude_waiting", "Waiting for usage"),
                     ("Claude Code", "claude_no_limits", "No limits reported"),
-                    ("Claude Code", "claude_setup_required", "Setup required"),
+                    ("Claude Code", "claude_setup_required", "Not connected"),
                     ("Claude Code", "claude_setup_failed", "Check Claude settings"),
                 ):
                     window.page().runJavaScript(

@@ -57,34 +57,41 @@ Compact view shows subscription limits only.*
 
 ## Connect your agents
 
-Open **Settings → Connections**. Local history is discovered automatically;
+Open **Settings → Agents**. Local history is discovered automatically;
 account limits use the native interfaces below. Opening the widget never changes
 Claude settings or starts a login.
 
 | Agent | Connection | Limits |
 | --- | --- | --- |
 | Codex | **Connect** reuses your ChatGPT login or opens the official sign-in page | Queried directly through Codex |
-| Claude Code | **Enable CLI capture** configures the terminal status line | Reported after a Claude terminal response; **not available from VS Code chat alone** |
+| Claude Code | **Connect** sets up capture and opens Claude in a terminal | Reported after a response in that terminal |
 
-Codex is detected on `PATH`, in its standard installation, or inside the official
-VS Code, VS Code Insiders or Cursor extension. Its executable handles sign-in and
-credentials; the widget does not read or store tokens. Sign-in can be cancelled.
+Both agents are detected on `PATH`, in their standard installation, or inside
+their official VS Code, VS Code Insiders or Cursor extension. Each agent handles
+its own sign-in and credentials; the widget does not read or store tokens.
+Codex sign-in can be cancelled in the widget.
 API-key accounts do not supply subscription limits. Windows and WSL are separate
-environments. A custom executable can be set with `subscriptions.codex_command`.
+environments. Custom executables can be set with `subscriptions.codex_command` or
+`subscriptions.claude_command`.
 [Native account interface](https://learn.chatgpt.com/docs/app-server).
 
-Claude capture requires an existing Claude profile and a subscription signed in
-through Claude Code. After enabling capture, restart Claude in a terminal and
-complete a request. Login alone does not supply limits. The widget shows
-**Waiting for terminal** until data arrives, and marks old readings as outdated.
+**Connect** opens Claude in a separate terminal, using the installed executable.
+Sign in there if needed and complete a request with your subscription. The widget
+shows **Waiting for usage** until native limits arrive. It never sends a prompt
+on your behalf. VS Code chat alone still does not supply these snapshots; closing
+the terminal can leave an outdated reading.
 [Native status-line interface](https://code.claude.com/docs/en/statusline).
 
-Setup preserves other Claude settings and backs up the previous file beside
+**Disconnect** pauses new history collection and limit monitoring for that agent,
+including Claude capture. The choice persists across restarts. It keeps the agent's
+login, open sessions and collected history. Reconnecting resumes collection from
+available native files, including activity recorded while monitoring was paused.
+
+Claude setup preserves other settings and backs up the previous file beside
 `settings.json`. Replacing another status line requires confirmation. Earlier
 Agent Usage commands are repaired by the same setup action; no command copying
 or manual JSON editing is needed. After moving the widget, use this action again.
-Capture retains only quota fields. **Receiving limits** means data was actually
-received, not merely that setup or sign-in finished.
+Capture retains only quota fields. A quota indicator appears only when actual usage data has arrived.
 
 ## Understand the data
 
@@ -115,8 +122,8 @@ before collection. Native log formats can change between agent versions.
 | Codex | `~/.codex/sessions/` and `~/.codex/archived_sessions/` |
 | Claude Code | `~/.claude/projects/` |
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. **Settings → Sources** changes
-the directories to read. **Project** selects a repository using the working
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. **Settings → Agents → History folder** changes
+the directory for each agent. **Project filter** selects a repository using the working
 directory recorded in sessions, including its subdirectories. Records without
 project metadata appear only in the unfiltered view.
 
@@ -131,7 +138,7 @@ offline account-limit service.
 | Linux | `$XDG_STATE_HOME/agent-usage`, normally `~/.local/state/agent-usage` |
 | Windows | `%LOCALAPPDATA%\AgentUsage` |
 
-**Sources → Export / Import** transfers the collected archive as JSON. Import
+**Settings → Export / Import** transfers the collected archive as JSON. Import
 merges records without duplicates, up to 64 MiB. Changing sources keeps collected
 history. Exports can contain private titles and paths; review them before sharing.
 To erase collected data, quit the widget and remove its state directory. Original

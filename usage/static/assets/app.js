@@ -14,7 +14,7 @@ const confirmed = row => row.status === 'completed' && row.duration_exact && val
 const stamp = value => new Date(value * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const color = name => getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim();
 const charts = {};
-const AGENTS = { Codex: { icon: 'chatgpt.svg', color: '--codex' }, 'Claude Code': { icon: 'claude.svg', color: '--claude' } };
+const AGENTS = { Codex: { id: 'codex', icon: 'chatgpt.svg', color: '--codex' }, 'Claude Code': { id: 'claude', icon: 'claude.svg', color: '--claude' } };
 let chartSignature = '';
 let data = null, providers = [], failed = false, subscriptionsLoaded = false, quotaSignature = '';
 let activitySignature = '';
@@ -484,58 +484,78 @@ function quotaCard(provider, item, multipleBuckets) {
   return card;
 }
 
+for (const [agent, info] of Object.entries(AGENTS)) {
+  const card = el('article', undefined, 'agent-card');
+  const header = el('div', undefined, 'agent-connection');
+  const identity = el('div'), label = el('span', undefined, 'source-label');
+  label.append(agentIcon(agent), el('span', agent.replace(' Code', '')));
+  const status = el('span', 'Checking…', 'caption'); status.id = info.id + '-connection'; status.setAttribute('role', 'status');
+  identity.append(label, status);
+  const action = el('button', 'Connect', 'setting-action'); action.dataset.connect = info.id;
+  header.append(identity, action);
+  const source = el('details', undefined, 'agent-source'); source.id = 'source-details-' + info.id;
+  const summary = el('summary', 'History folder');
+  const reset = el('button', 'Reset', 'text-button source-reset'); reset.dataset.default = info.id; reset.hidden = true;
+  const folder = el('button', undefined, 'source-path'); folder.id = 'source-' + info.id; folder.dataset.source = info.id; folder.disabled = true;
+  folder.setAttribute('aria-label', 'Choose ' + agent + ' session directory');
+  folder.innerHTML = '<span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg>';
+  const empty = el('p', 'No session files found', 'caption source-empty'); empty.id = 'source-empty-' + info.id; empty.hidden = true;
+  source.append(summary, reset, folder, empty); card.append(header, source); $('agent-settings').append(card);
+}
 const CONNECTION_MESSAGES = {
-  not_found: ['Codex not found', 'Install Codex or its official VS Code extension in this environment.'],
-  login_required: ['Sign in required', 'Connect with your ChatGPT account in Settings → Connections.'],
-  unsupported_account: ['ChatGPT login required', 'API-key accounts do not provide subscription limits.'],
+  disconnected: ['Disconnected', 'Monitoring is paused. Your agent login and collected history are kept.'],
+  not_found: ['Not installed', 'Install Codex or its official VS Code extension in this environment.'],
+  login_required: ['Not connected', 'Connect to use your ChatGPT subscription.'],
+  unsupported_account: ['Subscription required', 'API-key accounts do not provide subscription limits.'],
   login_cancelled: ['Connection cancelled', 'No new connection was established.'],
   timeout: ['Connection timed out', 'Try connecting again.'],
   query_failed: ['Limits unavailable', 'The native account query failed.'],
-  claude_waiting: ['Waiting for terminal', 'Restart Claude Code in a terminal and complete a request with your subscription.'],
+  claude_waiting: ['Waiting for usage', 'Complete a request in the Claude terminal opened by Connect.'],
   claude_no_limits: ['No limits reported', 'Claude has supplied a snapshot without subscription limits.'],
-  claude_not_found: ['Claude profile not found', 'Start Claude Code in this environment before enabling capture.'],
-  claude_setup_required: ['Setup required', 'Set up or repair terminal capture in Settings → Connections.'],
+  claude_not_found: ['Not connected', 'Connect to open Claude Code and set up monitoring.'],
+  claude_setup_required: ['Not connected', 'Connect to open Claude Code and set up monitoring.'],
   claude_setup_failed: ['Check Claude settings', 'Claude settings could not be read. Check file permissions and valid JSON.'],
 };
 function connectionMessage(provider) {
-  if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Receiving limits', ''];
+  if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Connected', ''];
   return CONNECTION_MESSAGES[provider?.issue] || ['Limits unavailable', 'No current account limits were reported.'];
 }
-let connecting = false, cancelling = false, capturing = false;
+let connectionTask = null, cancelling = false, connectionRevision = 0;
 function renderConnections() {
-  for (const [key, agent] of [['codex', 'Codex'], ['claude', 'Claude Code']]) {
+  for (const [agent, {id}] of Object.entries(AGENTS)) {
     const provider = providers.find(p => p.agent === agent);
     const [label, hint] = connectionMessage(provider);
-    $(key + '-connection').textContent = key === 'codex' && connecting ? 'Finish sign-in in your browser' : subscriptionsLoaded ? label : 'Checking…';
-    $(key + '-connection').title = hint;
-    const button = document.querySelector('[data-connect="' + key + '"]');
-    button.disabled = key === 'codex' ? cancelling : capturing;
-    button.textContent = key === 'codex' ? (connecting ? 'Cancel' : provider?.windows?.length ? 'Check' : 'Connect')
-      : provider?.issue === 'claude_waiting' || provider?.issue === 'claude_no_limits' ? 'Check setup' : 'Enable CLI capture';
+    const busy = connectionTask?.agent === id;
+    $(id + '-connection').textContent = busy ? (connectionTask.method === 'disconnect' ? 'Disconnecting…' : 'Connecting…') : subscriptionsLoaded ? label : 'Checking…';
+    $(id + '-connection').title = hint;
+    const button = document.querySelector('[data-connect="' + id + '"]');
+    const canCancel = busy && connectionTask.method === 'connect' && id === 'codex';
+    button.disabled = !!connectionTask && (!canCancel || cancelling);
+    button.textContent = canCancel ? 'Cancel' : (provider?.connected ?? !!provider?.windows?.length) ? 'Disconnect' : 'Connect';
+    button.title = provider?.connected ? 'Pause monitoring; keep login and history' : 'Start monitoring';
   }
 }
-$('agent-connections').addEventListener('click', async event => {
+$('agent-settings').addEventListener('click', async event => {
   const button = event.target.closest('[data-connect]');
   if (!button) return;
   const agent = button.dataset.connect;
   settingsMessage();
-  if (agent === 'codex' && connecting) {
+  if (connectionTask) {
+    if (agent !== 'codex' || connectionTask.agent !== agent || connectionTask.method !== 'connect') return;
     cancelling = true; renderConnections();
     try { await native('cancel_login', agent); } catch (error) { settingsMessage(error.message); }
     return;
   }
-  if (agent === 'codex') { connecting = true; renderConnections(); }
-  else { capturing = true; renderConnections(); }
+  const provider = providers.find(p => AGENTS[p.agent]?.id === agent);
+  const method = (provider?.connected ?? !!provider?.windows?.length) ? 'disconnect' : 'connect';
+  connectionTask = {agent, method}; connectionRevision++; renderConnections();
   try {
-    const result = await native('connect', agent);
+    const result = await native(method, agent);
     if (result.cancelled) return;
     if (result.providers) { providers = result.providers; subscriptionsLoaded = true; }
-    else {
-      settingsMessage(connectionMessage(result)[1]);
-      await refresh('subscriptions');
-    }
+    else if (result.issue) settingsMessage(connectionMessage(result)[1]);
   } catch (error) { settingsMessage(error.message); }
-  finally { if (agent === 'codex') { connecting = false; cancelling = false; } else capturing = false; render(); }
+  finally { connectionTask = null; cancelling = false; render(); }
 });
 
 function renderSubscriptions() {
@@ -557,7 +577,7 @@ function renderSubscriptions() {
     const [label, hint] = connectionMessage(provider);
     const row = el('div', undefined, 'quota-unavailable');
     const action = el('button', label, 'text-button caption');
-    action.addEventListener('click', () => openSettings(true));
+    action.addEventListener('click', () => openSettings());
     row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), action);
     row.title = hint;
     $('subscriptions').append(row);
@@ -568,7 +588,7 @@ function renderSubscriptions() {
 function render() {
   updateAgents(); updateProjects(); renderSubscriptions(); renderConnections(); renderActivity();
   for (const name of ['codex', 'claude']) {
-    $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0;
+    $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0 || providers.some(p => AGENTS[p.agent]?.id === name && p.issue === 'disconnected');
   }
   const warnings = preferences.view === 'compact' ? [] : data?.warnings || [];
   $('connection-status').hidden = preferences.view === 'compact' || (!failed && !warnings.length);
@@ -581,15 +601,16 @@ async function refresh(name) {
   const feed = feeds[name];
   if (feed.busy || document.hidden) return;
   feed.busy = true;
+  const revision = connectionRevision;
   try {
     const next = await native(name);
     if (!Array.isArray(next[name === 'usage' ? 'rows' : 'providers'])) throw Error('Unavailable');
     feed.seconds = next.refresh_seconds || feed.seconds;
     if (name === 'usage') { data = next; failed = false; }
-    else { providers = next.providers; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { providers = next.providers; subscriptionsLoaded = true; }
   } catch {
     if (name === 'usage') failed = true;
-    else { providers = []; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { providers = []; subscriptionsLoaded = true; }
   } finally {
     feed.busy = false;
     clearTimeout(feed.timer);
@@ -602,10 +623,9 @@ function changePeriod(value) {
   savePreferences(); promptId = null; bucketId = null; hideHeatmapTooltip(); render();
 }
 
-async function openSettings(connections = false) {
+async function openSettings() {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
   $('view-setting').value = preferences.view; $('style-setting').value = preferences.style; $('pinned-setting').checked = preferences.pinned;
-  if (connections) $('agent-connections').open = true;
   $('settings').showModal(); reportSize();
   try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
 }
@@ -627,7 +647,7 @@ function showSources(next) {
     document.querySelector('[data-default="' + name + '"]').hidden = !sources[name].override;
   }
 }
-$('source-settings').addEventListener('click', async event => {
+$('agent-settings').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
   const name = button.dataset.source || button.dataset.default;
