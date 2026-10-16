@@ -326,4 +326,4 @@ class Subscriptions:
                 )
                 result["connected"] = connections.get(key, bool(result["windows"]))
                 providers.append(result)
-            return dict(providers=providers, refresh_seconds=self.config["refresh_seconds"])
+            return dict(providers=providers)

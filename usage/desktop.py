@@ -227,7 +227,11 @@ class Bridge(QObject):
         if method == "usage":
             return self.usage.snapshot()
         if method == "subscriptions":
-            return self.subscriptions.snapshot(self.usage.connections)
+            # Local captures follow collection cadence; account queries keep their own cache.
+            return dict(
+                self.subscriptions.snapshot(self.usage.connections),
+                refresh_seconds=self.usage.config["collection"]["refresh_seconds"],
+            )
         if method == "sources":
             return self.usage.sources()
         if method in ("choose_directory", "reset_source"):

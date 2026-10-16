@@ -19,7 +19,7 @@ let chartSignature = '';
 let data = null, providers = [], failed = false, subscriptionsLoaded = false, quotaSignature = '';
 let activitySignature = '';
 let heatmapSignature = '', buckets = new Map(), bucketId = null;
-const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 60 } };
+const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 1 } };
 let agentFilter = 'all', promptId = null;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '' };

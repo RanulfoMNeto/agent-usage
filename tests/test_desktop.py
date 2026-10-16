@@ -17,6 +17,7 @@ from usage.config import load_config, user_directory
 from usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
 from usage.history import MAX_IMPORT
 from usage.readers import project_path
+from usage.subscriptions import Subscriptions, capture_claude
 
 
 class ConfigTests(unittest.TestCase):
@@ -56,6 +57,7 @@ class DesktopTests(unittest.TestCase):
         self.window.apply_preferences = Mock()
         self.settings = QSettings(str(self.root / "settings.ini"), QSettings.Format.IniFormat)
         self.usage = Mock()
+        self.usage.config = {"collection": {"refresh_seconds": 1}}
         self.usage.sources.return_value = {
             "codex": {"path": str(self.root), "override": "", "exists": True},
             "claude": {"path": str(self.root), "override": "", "exists": True},
@@ -460,6 +462,35 @@ class DesktopTests(unittest.TestCase):
                         "[...document.querySelectorAll('.quota-unavailable .caption')]"
                         f".some(node=>node.textContent==='{label}')"
                     )
+                # A native capture must reach Settings and gauges without clicks or restart.
+                config = load_config()["subscriptions"]
+                config["claude_file"] = str(self.root / "claude.json")
+                source = Subscriptions(config)
+                source.query_codex = Mock(
+                    return_value={"agent": "Codex", "windows": [], "updated_at": now}
+                )
+                self.usage.connections = {"claude": True}
+                window.bridge.subscriptions = source
+                window.page().runJavaScript("openSettings()")
+                with patch("usage.subscriptions.claude_status", return_value="claude_waiting"):
+                    wait_for("$('claude-connection').textContent==='Waiting for usage'")
+                    capture_claude(
+                        config["claude_file"],
+                        {
+                            "rate_limits": {
+                                "five_hour": {"used_percentage": 0, "resets_at": now + 3600},
+                                "seven_day": {"used_percentage": 3, "resets_at": now + 86400},
+                            }
+                        },
+                    )
+                    wait_for("$('claude-connection').textContent==='Connected'")
+                    self.assertEqual(
+                        evaluate("""[...document.querySelectorAll(
+                            '.quota-card[data-agent="Claude Code"] .quota-percent')]
+                            .map(node=>node.textContent)"""),
+                        ["0%", "3%"],
+                    )
+                    source.query_codex.assert_called_once()
         finally:
             window.close()
             window.bridge.close()
