@@ -107,8 +107,8 @@ select:disabled { cursor: default; }
 .quota-reset, .quota-stale { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .quota-stale { margin: 0 0 0 auto; font-size: 9px; font-weight: 400; }
 .quota-warning { display: inline-block; margin-top: 6px; padding: 2px 7px; border-radius: 5px; font-size: 9px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); }
-:root[data-indicator='ring'] .quota-limits { grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr)); gap: 12px; }
-:root[data-indicator='ring'] .quota-limit { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+:root[data-indicator='ring'] .quota-limits { grid-template-columns: repeat(auto-fit, minmax(min(100%, 152px), 1fr)); gap: 12px 8px; }
+:root[data-indicator='ring'] .quota-limit { display: grid; grid-template-columns: 64px minmax(0, max-content); justify-content: center; align-items: center; gap: 8px; text-align: left; }
 :root[data-indicator='ring'] .quota-info { overflow-wrap: anywhere; }
 :root[data-indicator='bar'] .quota-limit { position: relative; display: block; padding-bottom: 12px; }
 :root[data-indicator='bar'] .quota-gauge { position: absolute; inset: auto 0 0; width: 100%; height: 5px; aspect-ratio: auto; border-radius: 5px; background: var(--track); }
