@@ -48,6 +48,33 @@ def context(model="model"):
 
 
 class HistoryTests(unittest.TestCase):
+    def test_disconnect_stops_collection_persists_and_keeps_history(self):
+        self.write(self.basic())
+        self.store.sync()
+        original = self.store.export()
+        self.store.set_connection("codex", False)
+        records = self.basic()
+        records[0] = session("another")
+        records[2]["payload"]["turn_id"] = "another-turn"
+        records[5]["payload"]["turn_id"] = "another-turn"
+        self.write(records, name="another.jsonl")
+        self.store.sync()
+        self.assertEqual(self.store.export(), original)
+        self.assertEqual(list(self.store.paths()), [])
+        restored = Usage(self.config)
+        try:
+            self.assertFalse(restored.connections["codex"])
+            self.assertEqual(list(restored.paths()), [])
+            restored.set_connection("codex", True)
+            self.assertEqual(len(list(restored.paths())), 2)
+            self.assertEqual(restored.export(), original)
+            restored.sync()
+            self.assertEqual(len(restored.snapshot()["rows"]), 2)
+            with self.assertRaises(ValueError):
+                restored.set_connection("unknown", False)
+        finally:
+            restored.close()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

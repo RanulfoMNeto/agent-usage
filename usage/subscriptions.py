@@ -3,18 +3,14 @@
 import asyncio
 import json
 import os
-import platform
-import re
-import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .integration import claude_status
+from .integration import agent_command, claude_status
 from .readers import number
 
 
@@ -33,40 +29,6 @@ def validate_login_url(value):
     ):
         raise ValueError("Invalid native login URL")
     return value
-
-
-def codex_command(command):
-    """Reuse a native installation when the default command is not on PATH."""
-    if command != ["codex"]:
-        return command
-    windows = sys.platform == "win32"
-    name = "codex.exe" if windows else "codex"
-    found = shutil.which(name)
-    # Do not auto-discover a program in the current project or Downloads directory.
-    if found and Path(found).is_absolute() and Path(found).parent != Path.cwd():
-        return [found]
-    home = Path.home()
-    installed = (
-        Path(os.environ.get("LOCALAPPDATA") or home / "AppData/Local") / "Programs/OpenAI/Codex/bin"
-        if windows
-        else home / ".local/bin"
-    )
-    candidates = [Path(os.environ.get("CODEX_INSTALL_DIR") or installed).expanduser() / name]
-    machine = platform.machine().lower()
-    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
-    target = ("windows" if windows else "linux") + "-" + architecture
-    for editor in (".vscode", ".vscode-insiders", ".cursor"):
-        extensions = (home / editor / "extensions").glob("openai.chatgpt-*")
-        for extension in sorted(
-            extensions,
-            key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
-            reverse=True,
-        ):
-            candidates.append(extension / "bin" / target / name)
-    for candidate in candidates:
-        if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
-            return [str(candidate)]
-    raise FileNotFoundError("Codex executable unavailable")
 
 
 def window(name, minutes, used, resets):
@@ -116,7 +78,7 @@ async def read_codex(command, timeout, *, login=None, cancelled=None):
     process = await asyncio.create_subprocess_exec(
         *[
             str(Path(arg).expanduser()) if arg.startswith("~") else arg
-            for arg in codex_command(command)
+            for arg in agent_command("codex", command)
         ],
         "app-server",
         stdin=asyncio.subprocess.PIPE,
@@ -277,23 +239,28 @@ class Subscriptions:
                 self.checked = time.monotonic()
         finally:
             self.login_lock.release()
-        return self.snapshot()
+        return result
 
     def cancel_login(self, *, close=False):
         self.closed = self.closed or close
         self.cancelled.set()
 
-    def snapshot(self):
+    def snapshot(self, connections=None):
+        connections = connections or {}
         with self.lock:
-            if (
+            if connections.get("codex") is not False and (
                 self.checked is None
                 or time.monotonic() - self.checked >= self.config["refresh_seconds"]
             ):
                 self.codex = self.query_codex()
                 self.checked = time.monotonic()
             try:
-                raw = json.loads(
-                    Path(self.config["claude_file"]).expanduser().read_text(encoding="utf-8")
+                raw = (
+                    {}
+                    if connections.get("claude") is False
+                    else json.loads(
+                        Path(self.config["claude_file"]).expanduser().read_text(encoding="utf-8")
+                    )
                 )
                 # Revalidate the local snapshot; serve no arbitrary captured fields.
                 claude = dict(
@@ -319,7 +286,11 @@ class Subscriptions:
                     windows=[],
                 )
             now = time.time()
-            issue = claude_status(self.config_path)
+            issue = (
+                "disconnected"
+                if connections.get("claude") is False
+                else claude_status(self.config_path)
+            )
             claude["issue"] = (
                 "claude_no_limits"
                 if issue == "claude_waiting"
@@ -328,8 +299,20 @@ class Subscriptions:
                 else issue
             )
             providers = []
-            for provider in (self.codex, claude):
+            codex = self.codex or dict(agent="Codex", windows=[], updated_at=None)
+            for provider in (codex, claude):
                 result = dict(provider)
+                key = "codex" if provider["agent"] == "Codex" else "claude"
+                if connections.get(key) is False:
+                    result.update(
+                        windows=[],
+                        updated_at=None,
+                        status="unavailable",
+                        issue="disconnected",
+                        connected=False,
+                    )
+                    providers.append(result)
+                    continue
                 result["windows"] = [w for w in provider["windows"] if w["resets_at"] > now]
                 age = now - provider["updated_at"] if provider["updated_at"] is not None else None
                 result["status"] = (
@@ -341,5 +324,6 @@ class Subscriptions:
                         else "available"
                     )
                 )
+                result["connected"] = connections.get(key, bool(result["windows"]))
                 providers.append(result)
             return dict(providers=providers, refresh_seconds=self.config["refresh_seconds"])

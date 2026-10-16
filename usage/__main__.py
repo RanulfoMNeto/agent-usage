@@ -45,6 +45,10 @@ def main():
             print(install_gnome(args.config, remove=args.uninstall_gnome))
             return
         if args.capture_claude:
+            from usage.history import load_connections
+
+            if load_connections(config["history"]["database"]).get("claude") is False:
+                return
             snapshot = capture_claude(
                 config["subscriptions"]["claude_file"], json.loads(sys.stdin.buffer.read(65537))
             )

@@ -82,6 +82,26 @@ class CLITests(unittest.TestCase):
         with patch.object(sys, "frozen", True, create=True):
             self.assertEqual(launch_command(), [sys.executable])
 
+    def test_disconnected_capture_ignores_input_and_keeps_previous_snapshot(self):
+        with profile() as (config, _):
+            store = Usage(config)
+            try:
+                store.set_connection("claude", False)
+                capture = Path(config["subscriptions"]["claude_file"])
+                capture.parent.mkdir(parents=True, exist_ok=True)
+                capture.write_text("previous snapshot")
+                result = subprocess.run(
+                    shlex.split(claude_command()),
+                    input="PRIVATE",
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(capture.read_text(), "previous snapshot")
+            finally:
+                store.close()
+
     def test_launch_registers_shortcut_but_never_configures_agents(self):
         with profile() as (config, _):
             with (

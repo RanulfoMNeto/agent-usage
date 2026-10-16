@@ -15,6 +15,7 @@ show_question = true
 
 [subscriptions]
 codex_command = ["codex"]
+claude_command = ["claude"]
 refresh_seconds = 60
 timeout_seconds = 10
 stale_seconds = 300

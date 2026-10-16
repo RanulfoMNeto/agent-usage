@@ -9,18 +9,44 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from usage.integration import agent_command
 from usage.subscriptions import (
     CodexUnavailable,
     Subscriptions,
     capture_claude,
     claude_snapshot,
-    codex_command,
     codex_snapshot,
     read_codex,
 )
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_disconnected_agents_do_not_query_accounts_or_read_captures(self):
+        source = Subscriptions(
+            dict(
+                codex_command=["codex"],
+                claude_file="unused",
+                refresh_seconds=60,
+                timeout_seconds=2,
+                stale_seconds=300,
+            )
+        )
+        with (
+            patch("usage.subscriptions.read_codex", new_callable=AsyncMock) as read,
+            patch("usage.subscriptions.Path.read_text") as capture,
+            patch("usage.subscriptions.claude_status") as status,
+        ):
+            providers = source.snapshot({"codex": False, "claude": False})["providers"]
+            read.assert_not_called()
+            capture.assert_not_called()
+            status.assert_not_called()
+            self.assertTrue(
+                all(
+                    p["issue"] == "disconnected" and not p["connected"] and not p["windows"]
+                    for p in providers
+                )
+            )
+
     def test_login_uses_native_flow_validates_urls_and_can_be_cancelled(self):
         processes = []
         create = asyncio.create_subprocess_exec
@@ -91,9 +117,9 @@ time.sleep(30)
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             with (
-                patch("usage.subscriptions.Path.home", return_value=home),
-                patch("usage.subscriptions.shutil.which", return_value=None) as which,
-                patch("usage.subscriptions.platform.machine", return_value="AMD64"),
+                patch("usage.integration.Path.home", return_value=home),
+                patch("usage.integration.shutil.which", return_value=None) as which,
+                patch("usage.integration.platform.machine", return_value="AMD64"),
                 patch.dict(
                     os.environ,
                     {"LOCALAPPDATA": str(home / "AppData/Local"), "CODEX_INSTALL_DIR": ""},
@@ -110,7 +136,7 @@ time.sleep(30)
                 ):
                     with self.subTest(system=system), patch("sys.platform", system):
                         with self.assertRaises(FileNotFoundError):
-                            codex_command(["codex"])
+                            agent_command("codex", ["codex"])
                         for editor in (".vscode", ".vscode-insiders", ".cursor"):
                             versions = []
                             for version in ("1.9.0", "1.10.0"):
@@ -127,31 +153,31 @@ time.sleep(30)
                                 path.touch()
                                 path.chmod(0o700)
                                 versions.append(path)
-                            self.assertEqual(codex_command(["codex"]), [str(versions[-1])])
+                            self.assertEqual(agent_command("codex", ["codex"]), [str(versions[-1])])
                             versions[-1].unlink()
-                            self.assertEqual(codex_command(["codex"]), [str(versions[0])])
+                            self.assertEqual(agent_command("codex", ["codex"]), [str(versions[0])])
                             versions[0].unlink()
                         native = installed / name
                         native.parent.mkdir(parents=True, exist_ok=True)
                         native.touch()
                         native.chmod(0o700)
-                        self.assertEqual(codex_command(["codex"]), [str(native)])
+                        self.assertEqual(agent_command("codex", ["codex"]), [str(native)])
                         custom = home / "custom install" / name
                         custom.parent.mkdir(exist_ok=True)
                         custom.touch()
                         custom.chmod(0o700)
                         with patch.dict(os.environ, {"CODEX_INSTALL_DIR": str(custom.parent)}):
-                            self.assertEqual(codex_command(["codex"]), [str(custom)])
+                            self.assertEqual(agent_command("codex", ["codex"]), [str(custom)])
                         custom.unlink()
                         which.return_value = str(home / "on-path" / name)
-                        self.assertEqual(codex_command(["codex"]), [which.return_value])
+                        self.assertEqual(agent_command("codex", ["codex"]), [which.return_value])
                         which.return_value = str(Path.cwd() / name)
-                        self.assertEqual(codex_command(["codex"]), [str(native)])
+                        self.assertEqual(agent_command("codex", ["codex"]), [str(native)])
                         which.return_value = None
                         native.unlink()
                 override = ["/custom/codex", "-c", "model_provider=custom"]
                 which.reset_mock()
-                self.assertEqual(codex_command(override), override)
+                self.assertEqual(agent_command("codex", override), override)
                 which.assert_not_called()
 
     def test_codex_preserves_native_windows_and_zero_without_private_fields(self):

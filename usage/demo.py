@@ -13,7 +13,7 @@ from .config import load_config
 
 
 class DemoLimits:
-    def snapshot(self):
+    def snapshot(self, connections=None):
         now = time.time()
         return {
             "providers": [

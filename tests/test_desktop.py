@@ -105,7 +105,11 @@ class DesktopTests(unittest.TestCase):
 
     def test_connections_are_explicit_and_custom_capture_requires_confirmation(self):
         self.bridge.subscriptions.config_path = None
+        self.bridge.subscriptions.config = {"claude_command": ["claude"]}
+        self.bridge.subscriptions.snapshot.return_value = {"providers": []}
         with (
+            patch("usage.desktop.claude_terminal_command", return_value=["claude"]),
+            patch("usage.desktop.open_claude_terminal") as terminal,
             patch(
                 "usage.desktop.install_claude_statusline", return_value="claude_custom_statusline"
             ) as install,
@@ -120,7 +124,10 @@ class DesktopTests(unittest.TestCase):
             install.side_effect = ["claude_custom_statusline", "claude_waiting"]
             self.bridge.request("2", "connect", '"claude"')
             install.assert_called_with(None, replace=True)
-            self.assertEqual(self.responses[-1], {"issue": "claude_waiting"})
+            QTest.qWait(40)
+            self.assertEqual(self.responses[-1], {"providers": []})
+            terminal.assert_called_once_with(["claude"])
+            self.usage.set_connection.assert_called_once_with("claude", True)
             install.reset_mock()
             self.window.config = {"demo": True}
             self.bridge.request("3", "connect", '"claude"')

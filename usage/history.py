@@ -34,6 +34,21 @@ UPSERT = """INSERT INTO records VALUES (?, ?, ?, ?, ?)
     WHERE excluded.id != excluded.counter AND excluded.updated >= records.updated"""
 
 
+def load_connections(path):
+    """Read monitoring choices without creating a history database."""
+    path = Path(path).expanduser().absolute()
+    if not path.is_file():
+        return {}
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+        row = db.execute("SELECT value FROM settings WHERE key='connections'").fetchone()
+    values = json.loads(row[0]) if row else {}
+    if not isinstance(values, dict) or any(
+        key not in ("codex", "claude") or type(value) is not bool for key, value in values.items()
+    ):
+        raise ValueError("Invalid connections")
+    return values
+
+
 def validate(record):
     if not isinstance(record, dict) or record.get("kind") not in ("prompt", "call"):
         raise ValueError("Invalid history record")
@@ -175,6 +190,7 @@ class Usage:
         self.cached = None
         self.scanning, self.warnings = True, []
         self.source_counts = {}
+        self.connections = load_connections(self.path)
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=15)
@@ -221,17 +237,30 @@ class Usage:
             self.source_counts = {}
         return self.sources()
 
+    def set_connection(self, agent, enabled):
+        if agent not in ("codex", "claude") or type(enabled) is not bool:
+            raise ValueError("Invalid connection")
+        with self.lock:
+            values = {**self.connections, agent: enabled}
+            with closing(self.connect()) as db, db:
+                db.execute(
+                    "INSERT OR REPLACE INTO settings VALUES ('connections', ?)",
+                    (json.dumps(values),),
+                )
+            self.connections = values
+
     def paths(self):
         sources = self.source_roots()
         root = sources["codex"]
         roots = [root / "sessions", root / "archived_sessions"]
         if not any(p.is_dir() for p in roots):
             roots = [root]
-        for directory in roots:
+        for directory in roots if self.connections.get("codex") is not False else []:
             for path in directory.rglob("*.jsonl"):
                 yield "Codex", path
-        for path in sources["claude"].rglob("*.jsonl"):
-            yield "Claude Code", path
+        if self.connections.get("claude") is not False:
+            for path in sources["claude"].rglob("*.jsonl"):
+                yield "Claude Code", path
 
     def sync(self):
         warnings = []

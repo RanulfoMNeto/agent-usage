@@ -10,17 +10,72 @@ from unittest.mock import patch
 
 from usage.integration import (
     UUID,
+    ConnectionUnavailable,
+    agent_command,
     claude_command,
     claude_status,
+    claude_terminal_command,
     install_claude_statusline,
     install_gnome,
     install_windows_shortcut,
     launch_command,
+    open_claude_terminal,
     owns_claude_command,
 )
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_claude_discovery_and_terminal_arguments_are_portable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            with (
+                patch("usage.integration.Path.home", return_value=home),
+                patch("usage.integration.shutil.which", return_value=None) as which,
+            ):
+                for system, name in (("linux", "claude"), ("win32", "claude.exe")):
+                    with self.subTest(system=system), patch("sys.platform", system):
+                        binary = (
+                            home
+                            / ".vscode/extensions/anthropic.claude-code-2.1.301/resources/native-binary"
+                            / name
+                        )
+                        binary.parent.mkdir(parents=True, exist_ok=True)
+                        binary.touch()
+                        binary.chmod(0o700)
+                        self.assertEqual(agent_command("claude", ["claude"]), [str(binary)])
+                        if system == "win32":
+                            self.assertEqual(claude_terminal_command(["claude"]), [str(binary)])
+                            with (
+                                patch("usage.integration.subprocess.Popen") as launch,
+                                patch(
+                                    "usage.integration.subprocess.CREATE_NEW_CONSOLE",
+                                    16,
+                                    create=True,
+                                ),
+                            ):
+                                open_claude_terminal([str(binary)])
+                                launch.assert_called_once_with(
+                                    [str(binary)], cwd=home, creationflags=16
+                                )
+                        else:
+                            with self.assertRaises(ConnectionUnavailable):
+                                claude_terminal_command(["claude"])
+                            which.side_effect = lambda name: (
+                                "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+                            )
+                            override = [str(home / "Claude $data; & binary"), "a b"]
+                            args = claude_terminal_command(override)
+                            self.assertEqual(args, ["/usr/bin/gnome-terminal", "--", *override])
+                            with patch(
+                                "PySide6.QtCore.QProcess.startDetached", return_value=(True, 123)
+                            ) as launch:
+                                open_claude_terminal(args)
+                                launch.assert_called_once_with(args[0], args[1:], str(home))
+                            which.side_effect = None
+                        binary.unlink()
+                        with self.assertRaises(ConnectionUnavailable):
+                            claude_terminal_command(["claude"])
+
     def test_legacy_capture_is_repaired_only_on_request(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
@@ -133,8 +188,10 @@ class IntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(path.parent / "missing")}):
-                self.assertEqual(install_claude_statusline(), "claude_not_found")
+                self.assertEqual(claude_status(), "claude_not_found")
                 self.assertFalse(path.parent.joinpath("missing").exists())
+                self.assertEqual(install_claude_statusline(), "claude_waiting")
+                self.assertTrue(path.parent.joinpath("missing/settings.json").is_file())
             with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
                 for original in (
                     b'{"statusLine":{"type":"command","command":"my-status --verbose"}}',

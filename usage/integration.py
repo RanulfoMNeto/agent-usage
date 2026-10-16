@@ -4,6 +4,8 @@ import ast
 import base64
 import json
 import os
+import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,6 +15,92 @@ from pathlib import Path
 
 BUNDLE = Path(__file__).with_name("gnome")
 UUID = "agent-usage@agent-usage.local"
+
+
+class ConnectionUnavailable(RuntimeError):
+    """An actionable connection failure without command output or private paths."""
+
+
+def claude_terminal_command(command):
+    """Prepare an argument list; never ask a shell to interpret user paths."""
+    try:
+        args = agent_command("claude", command)
+    except FileNotFoundError:
+        raise ConnectionUnavailable(
+            "Install Claude Code or its official VS Code extension."
+        ) from None
+    args = [str(Path(arg).expanduser()) if arg.startswith("~") else arg for arg in args]
+    if sys.platform == "win32":
+        return args
+    for terminal, separator in (
+        ("xdg-terminal-exec", []),
+        ("gnome-terminal", ["--"]),
+        ("konsole", ["-e"]),
+        ("x-terminal-emulator", ["-e"]),
+    ):
+        executable = shutil.which(terminal)
+        if executable:
+            return [executable, *separator, *args]
+    raise ConnectionUnavailable("No supported terminal found. Install a desktop terminal.")
+
+
+def open_claude_terminal(args):
+    """Keep the interactive session separate from the widget's lifetime."""
+    try:
+        if sys.platform == "win32":
+            return subprocess.Popen(
+                args, cwd=Path.home(), creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        from PySide6.QtCore import QProcess
+
+        started, _ = QProcess.startDetached(args[0], args[1:], str(Path.home()))
+        if started:
+            return None
+    except OSError:
+        pass
+    raise ConnectionUnavailable("Could not open the Claude terminal. Try connecting again.")
+
+
+def agent_command(agent, command):
+    """Reuse a native installation when the default command is not on PATH."""
+    if agent not in ("codex", "claude"):
+        raise ValueError("Unknown agent")
+    if command != [agent]:
+        return command
+    windows = sys.platform == "win32"
+    name = agent + (".exe" if windows else "")
+    found = shutil.which(name)
+    # Do not auto-discover a program in the current project or Downloads directory.
+    if found and Path(found).is_absolute() and Path(found).parent != Path.cwd():
+        return [found]
+    home = Path.home()
+    installed = (
+        Path(os.environ.get("LOCALAPPDATA") or home / "AppData/Local") / "Programs/OpenAI/Codex/bin"
+        if windows and agent == "codex"
+        else home / ".local/bin"
+    )
+    directory = os.environ.get("CODEX_INSTALL_DIR") if agent == "codex" else None
+    candidates = [Path(directory or installed).expanduser() / name]
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    target = ("windows" if windows else "linux") + "-" + architecture
+    prefix = "openai.chatgpt" if agent == "codex" else "anthropic.claude-code"
+    for editor in (".vscode", ".vscode-insiders", ".cursor"):
+        extensions = (home / editor / "extensions").glob(prefix + "-*")
+        for extension in sorted(
+            extensions,
+            key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
+            reverse=True,
+        ):
+            candidates.append(
+                extension / "bin" / target / name
+                if agent == "codex"
+                else extension / "resources/native-binary" / name
+            )
+    for candidate in candidates:
+        if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
+            return [str(candidate)]
+    raise FileNotFoundError("Agent executable unavailable")
 
 
 def command(*args):
@@ -98,8 +186,7 @@ def install_claude_statusline(config=None, *, replace=False):
     from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 
     directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
-    if not directory.is_dir():
-        return "claude_not_found"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / "settings.json"
     lock = QLockFile(str(path) + ".agent-usage.lock")
     if not lock.tryLock(0):
