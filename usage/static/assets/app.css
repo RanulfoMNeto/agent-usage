@@ -5,7 +5,7 @@
   --layout-width: 100vw; --layout-scale: 1; --panel-padding: 16px;
   font-family: Inter, system-ui, sans-serif; color-scheme: light;
   --surface: #fafafa; --raised: #eeeff0; --text: #24272b; --muted: #626970;
-  --line: #d8dde0; --track: #e1e6e6; --codex: #367b78; --claude: #d97757; --warning: var(--text);
+  --line: #d8dde0; --track: #e1e6e6; --codex: #367b78; --claude: #d97757; --warning: var(--text); --neutral: var(--muted);
   --shell: var(--surface); --panel: #ffffff; --control: var(--raised); --edge: var(--line);
   --radius: 20px; --card-radius: 14px; --control-radius: 10px; --cell-radius: 4px;
   --stroke: 1px; --shadow: 0 2px 8px #00000012; --panel-shadow: none; --control-shadow: none;
@@ -61,7 +61,7 @@ body:has(dialog[open]) .widget { visibility: hidden; }
 [hidden] { display: none !important; }
 h1, h2, p, dl { margin: 0; }
 button, select { font: inherit; color: inherit; cursor: pointer; }
-:focus-visible { outline: 2px solid var(--codex); outline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--neutral); outline-offset: 3px; }
 /* Transform preserves natural layout measurements while fitting either panel. */
 .widget, dialog { position: fixed; inset: calc(12px * var(--layout-scale)) auto auto calc(12px * var(--layout-scale)); margin: 0; width: calc(var(--layout-width) - 24px); transform: scale(var(--layout-scale)); transform-origin: top left; }
 .widget, dialog { padding: var(--panel-padding); }
@@ -128,8 +128,10 @@ select:disabled { cursor: default; }
 .history-chart canvas { cursor: crosshair; }
 .history-chart .empty { padding-top: 40px; }
 #line-coverage { min-height: 11px; }
-.heatmap { --heat: var(--codex); margin: 10px 0 12px; }
+.heatmap { --heat: var(--neutral); margin: 10px 0 12px; }
+.heatmap[data-agent='Codex'] { --heat: var(--codex); }
 .heatmap[data-agent='Claude Code'] { --heat: var(--claude); }
+.heatmap-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 10px; font-weight: var(--weight); }
 .heatmap-layout { display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 6px; }
 .heatmap-labels { display: grid; grid-template-rows: repeat(var(--rows, 7), minmax(0, 1fr)); gap: 3px; margin-top: 20px; font-size: 8px; line-height: 1; color: var(--muted); }
 .heatmap-labels span { display: flex; align-items: center; }
@@ -161,6 +163,8 @@ select:disabled { cursor: default; }
 .tooltip-date { font-size: 9px; color: var(--muted); }
 .heatmap-tooltip strong { display: block; margin-top: 4px; font-size: 12px; font-weight: var(--weight); }
 .tooltip-summary { margin-top: 4px; font-size: 9px; color: var(--muted); }
+.tooltip-agent { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 9px; }
+.tooltip-agent .agent-icon { width: 13px; height: 13px; }
 .summary-heading { margin-bottom: 10px; display: flex; flex-direction: column-reverse; gap: 5px; }
 .summary-heading h3 { margin: 0; font-size: 11px; font-weight: var(--weight); }
 #bucket-detail { grid-template-columns: .7fr 1fr 1.2fr; }
@@ -190,11 +194,11 @@ dialog::backdrop { background: transparent; }
 .setting-row label { display: flex; flex-shrink: 0; align-items: center; gap: 10px; font-size: 11px; }
 .range-field { display: flex; align-items: center; gap: 10px; flex: 0 1 154px; min-width: 0; }
 .range-field input { appearance: none; width: 100%; min-width: 0; height: 24px; margin: 0; background: transparent; cursor: pointer; }
-.range-field input::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(to right, var(--codex) var(--fill, 0%), var(--track) var(--fill, 0%)); }
-.range-field input::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border-radius: 50%; background: var(--codex); }
+.range-field input::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(to right, var(--neutral) var(--fill, 0%), var(--track) var(--fill, 0%)); }
+.range-field input::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border-radius: 50%; background: var(--neutral); }
 .range-field input::-moz-range-track { height: 3px; border-radius: 3px; background: var(--track); }
-.range-field input::-moz-range-progress { height: 3px; background: var(--codex); }
-.range-field input::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--codex); }
+.range-field input::-moz-range-progress { height: 3px; background: var(--neutral); }
+.range-field input::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--neutral); }
 .range-field output { min-width: 30px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
 .agent-settings { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .agent-settings > h2 { margin-bottom: 10px; color: var(--text); font-size: 11px; }
@@ -205,7 +209,7 @@ dialog::backdrop { background: transparent; }
 .source-reset { float: right; margin-top: 8px; }
 .source-label { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 10px; }
 .source-label .text-button { margin-left: auto; }
-.text-button { padding: 0; border: 0; background: transparent; color: var(--codex); font-size: 9px; }
+.text-button { padding: 0; border: 0; background: transparent; color: var(--neutral); font-size: 9px; }
 .source-path { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: var(--control-radius); background: var(--raised); text-align: left; }
 .source-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .source-path svg { width: 15px; height: 15px; margin-left: auto; flex-shrink: 0; fill: none; stroke: var(--muted); stroke-width: 1.5; }
@@ -217,7 +221,7 @@ dialog::backdrop { background: transparent; }
 #settings-status { margin-top: 12px; }
 .switch { appearance: none; width: 30px; height: 18px; padding: 3px; margin: 0; border-radius: var(--control-radius); background: var(--track); cursor: pointer; }
 .switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); }
-.switch:checked { background: var(--codex); }
+.switch:checked { background: var(--neutral); }
 .switch:checked::before { transform: translateX(12px); background: var(--surface); }
 .setting-row svg, .setting-action svg { width: 17px; height: 17px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
 .history-actions { display: flex; gap: 8px; margin-top: 16px; }
@@ -242,7 +246,7 @@ option { background: var(--surface); color: var(--text); }
 button { transition: background-color .15s, color .15s; }
 .quota-gauge { font-variant-numeric: tabular-nums; }
 .source-path { min-height: 38px; }
-.source-path:hover, .setting-action:hover { background: color-mix(in srgb, var(--codex) 10%, var(--surface)); }
+.source-path:hover, .setting-action:hover { background: color-mix(in srgb, var(--neutral) 10%, var(--surface)); }
 dialog .setting-row { margin: 16px 0; }
 #style-setting { min-width: 150px; }
 :root[data-style='glass'] .widget, :root[data-style='glass'] dialog { backdrop-filter: blur(12px); }

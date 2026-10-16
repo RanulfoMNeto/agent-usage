@@ -13,6 +13,9 @@ from .config import load_config
 
 
 class DemoLimits:
+    def __init__(self):
+        self.started_at = time.time()
+
     def snapshot(self, connections=None):
         now = time.time()
         return {
@@ -23,10 +26,19 @@ class DemoLimits:
                     status="available",
                     updated_at=now,
                     windows=[
-                        dict(name=agent, minutes=10080, used_percent=used, resets_at=now + 172800)
+                        dict(
+                            name=agent,
+                            minutes=minutes,
+                            used_percent=used,
+                            resets_at=self.started_at + remaining,
+                        )
+                        for minutes, used, remaining in limits
                     ],
                 )
-                for agent, used in (("Codex", 28), ("Claude Code", 42))
+                for agent, limits in (
+                    ("Codex", [(10080, 28, 172800)]),
+                    ("Claude Code", [(300, 14, 7200), (10080, 42, 345600)]),
+                )
             ]
         }
 

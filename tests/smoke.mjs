@@ -64,16 +64,16 @@ try {
     await evaluate(`changePeriod('${period}');true`); await pause(150);
     assert(await evaluate(fits));
     const size = await evaluate('[innerWidth,innerHeight]');
-    await evaluate("[...$('heatmap-grid').children].find(c=>!c.disabled&&c.dataset.level==='0')?.click();true");
+    await evaluate("[...document.querySelectorAll('.heat-cell')].find(c=>!c.disabled&&c.dataset.level==='0')?.click();true");
     await pause(100); assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
     await evaluate('openSettings().then(()=>true)'); await pause(100);
     assert(await evaluate(fits)); assert(await evaluate('innerHeight') < size[1]);
     await evaluate("$('settings').close();true"); await pause(100);
     assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
   }
-  const historyHeight = await evaluate('innerHeight');
+  const historyHeight = await evaluate("document.querySelector('.widget').offsetHeight");
   await evaluate("changePeriod('today');true"); await pause(150);
-  assert(await evaluate(fits)); assert(await evaluate('innerHeight') < historyHeight);
+  assert(await evaluate(fits)); assert(await evaluate("document.querySelector('.widget').offsetHeight") < historyHeight);
   for (const view of ['normal', 'compact']) {
     await evaluate(`$('view-setting').value='${view}';$('view-setting').dispatchEvent(new Event('change'));changePeriod('all');true`);
     await pause(200); assert(await evaluate(fits));

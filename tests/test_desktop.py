@@ -187,6 +187,139 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
             self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 1)
 
+    def test_weekly_cycles_select_agent_days_and_keep_history_combined(self):
+        now = int(time.time())
+        day = 86400
+        rows = [
+            {
+                "id": identifier,
+                "agent": agent,
+                "start": start,
+                "tokens": tokens,
+                "cost": tokens / 10000,
+                "project": "/example",
+            }
+            for identifier, agent, start, tokens in (
+                ("codex-before", "Codex", now - 4 * day - 1, 9000),
+                ("codex-boundary", "Codex", now - 4 * day, 100),
+                ("claude-before", "Claude Code", now - 2 * day - 1, 8000),
+                ("claude-boundary", "Claude Code", now - 2 * day, 200),
+                ("codex-today", "Codex", now, 300),
+                ("claude-today", "Claude Code", now, 400),
+                ("codex-future", "Codex", now + 3 * day, 7000),
+            )
+        ]
+        self.usage.snapshot.return_value = {
+            "rows": sorted(rows, key=lambda row: row["start"], reverse=True),
+            "warnings": [],
+        }
+        subscriptions = Mock()
+        subscriptions.snapshot.return_value = {
+            "providers": [
+                {
+                    "agent": agent,
+                    "status": "available",
+                    "updated_at": now,
+                    "windows": [
+                        {
+                            "name": agent,
+                            "minutes": 10080,
+                            "resets_at": now + days * day,
+                            "used_percent": 30,
+                        }
+                    ],
+                }
+                for agent, days in (("Codex", 3), ("Claude Code", 5))
+            ]
+        }
+        with self.renderer(subscriptions) as (window, evaluate, wait_for):
+            window.page().runJavaScript("changePeriod('weekly')")
+            wait_for("document.querySelectorAll('.heatmap').length===2")
+            self.assertEqual(evaluate("selected().length"), 4)
+            self.assertEqual(evaluate("$('total-tokens').textContent"), "1K")
+            self.assertTrue(
+                evaluate("""[...document.querySelectorAll('.heatmap-grid')]
+                .every(grid=>grid.children.length>=7 && grid.children.length<=8)""")
+            )
+            self.assertEqual(
+                evaluate("""new Set([...document.querySelectorAll('.heatmap-range')]
+                .map(node=>node.textContent)).size"""),
+                2,
+            )
+            # The same date has separate selections, totals and charts for each agent.
+            for agent, expected in (("Codex", "300"), ("Claude Code", "400")):
+                window.page().runJavaScript(
+                    "[...document.querySelectorAll('.heat-cell')].find(cell=>"
+                    f"cell.dataset.key===bucketKey({now},'{agent}')).click()"
+                )
+                wait_for(f"$('bucket-tokens').textContent==='{expected}'")
+                self.assertEqual(evaluate("$('bucket-prompts').textContent"), "1")
+                self.assertEqual(evaluate("charts.usage.data.datasets.map(d=>d.label)"), [agent])
+                self.assertTrue(
+                    evaluate("$('bucket-title').textContent").startswith(
+                        agent.replace(" Code", "") + " · "
+                    )
+                )
+                self.assertEqual(
+                    evaluate("document.querySelectorAll('.heat-cell[aria-pressed=true]').length"), 1
+                )
+            selection = evaluate("bucketId")
+            window.page().runJavaScript(
+                "[...document.querySelectorAll('.heat-cell')].find(cell=>"
+                f"cell.dataset.key===bucketKey({now},'Codex'))"
+                ".dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))"
+            )
+            wait_for("!$('heatmap-tooltip').hidden")
+            self.assertEqual(evaluate("bucketId"), selection)
+            self.assertEqual(evaluate("$('bucket-tokens').textContent"), "400")
+            self.assertIn("Codex", evaluate("$('heatmap-tooltip').textContent"))
+            # Include the exact boundary; exclude even one second before it.
+            window.page().runJavaScript(
+                "[...document.querySelectorAll('.heat-cell')].find(cell=>"
+                f"cell.dataset.key===bucketKey({now - 4 * day},'Codex')).click()"
+            )
+            wait_for("$('bucket-tokens').textContent==='100'")
+            window.page().runJavaScript(
+                "$('limit-options').querySelector('[value=\"10080\"]').click()"
+            )
+            wait_for("$('subscriptions-section').hidden")
+            self.assertEqual(evaluate("document.querySelectorAll('.heatmap').length"), 2)
+            self.assertEqual(evaluate("selected().length"), 4)
+            # A reset replaces the old cycle and clears a day outside the new window.
+            subscriptions.snapshot.return_value["providers"][0]["windows"][0]["resets_at"] = (
+                now + 7 * day - 10
+            )
+            wait_for("selected().length===3 && $('bucket-tokens').textContent==='300'")
+            self.assertEqual(evaluate("$('total-tokens').textContent"), "900")
+            # A missing cycle must not be invented from the other agent's reset.
+            subscriptions.snapshot.return_value["providers"][1]["windows"] = []
+            wait_for("document.querySelectorAll('.heatmap').length===1")
+            self.assertEqual(
+                evaluate("$('chart-coverage').textContent"), "Claude: weekly cycle unavailable."
+            )
+            window.page().runJavaScript("changePeriod('all')")
+            wait_for("$('heatmaps').dataset.period==='all'")
+            self.assertEqual(evaluate("selected().length"), 6)
+            self.assertEqual(evaluate("$('bucket-tokens').textContent"), "700")
+            self.assertEqual(evaluate("charts.usage.data.datasets.length"), 2)
+            self.assertEqual(
+                evaluate("""getComputedStyle(document.querySelector('.heatmap'))
+                .getPropertyValue('--heat').trim()"""),
+                evaluate("color('neutral')"),
+            )
+            window.page().runJavaScript(
+                "document.querySelector('.heat-cell[aria-pressed=true]')"
+                ".dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))"
+            )
+            wait_for("$('heatmap-tooltip').querySelectorAll('.tooltip-agent').length===2")
+            self.assertIn("Codex · 300 tokens", evaluate("$('heatmap-tooltip').textContent"))
+            self.assertIn("Claude · 400 tokens", evaluate("$('heatmap-tooltip').textContent"))
+            # Project filtering only affects activity, and empty days stay selectable.
+            window.page().runJavaScript("preferences.project='/missing';render()")
+            wait_for("$('bucket-prompts').textContent==='0'")
+            self.assertEqual(evaluate("$('usage-empty').textContent"), "No recorded prompts")
+            self.assertEqual(evaluate("providers[0].windows[0].used_percent"), 30)
+
     def test_only_packaged_assets_and_channel_are_accessible(self):
         interceptor = LocalOnly()
         for url, allowed in [
@@ -377,26 +510,6 @@ class DesktopTests(unittest.TestCase):
                 for agent in ("Codex", "Claude Code")
             ]
         }
-        with patch("usage.desktop.user_directory", return_value=self.root):
-            window = Widget({"width": 400, "compact_width": 300}, self.usage, subscriptions)
-
-        def evaluate(expression):
-            result = []
-            window.page().runJavaScript("JSON.stringify(" + expression + ")", result.append)
-            deadline = time.monotonic() + 10
-            while not result and time.monotonic() < deadline:
-                QTest.qWait(10)
-            self.assertTrue(result, "Renderer did not respond")
-            return json.loads(result[0])
-
-        def wait_for(expression):
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if evaluate(expression):
-                    return
-                QTest.qWait(20)
-            self.fail("Layout did not settle: " + expression)
-
         bounds = """(()=>{
             const p=$('settings').open?$('settings'):document.querySelector('.widget');
             const r=p.getBoundingClientRect();
@@ -408,10 +521,9 @@ class DesktopTests(unittest.TestCase):
         })()"""
         screen = Mock()
         screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
-        try:
+        with self.renderer(subscriptions) as (window, evaluate, wait_for):
             with patch.object(window, "screen", return_value=screen):
-                window.show()
-                wait_for("typeof data!=='undefined' && !!data && subscriptionsLoaded")
+                window.apply_size()
                 geometry = """(()=>{
                     const box = selector => {
                         const r=document.querySelector(selector).getBoundingClientRect();
@@ -452,7 +564,7 @@ class DesktopTests(unittest.TestCase):
                         )
                         # Empty days retain the chart's space; hidden Settings reserve none.
                         window.page().runJavaScript(
-                            "[...$('heatmap-grid').children].find(c=>!c.disabled&&"
+                            "[...document.querySelectorAll('.heat-cell')].find(c=>!c.disabled&&"
                             "c.dataset.level==='0').click()"
                         )
                         QTest.qWait(80)
@@ -498,7 +610,7 @@ class DesktopTests(unittest.TestCase):
                         self.assertEqual(window.height(), heights[period])
                     heights[period] = window.height()
                 self.assertLess(heights["today"], heights["weekly"])
-                self.assertLess(heights["weekly"], heights["all"])
+                self.assertLess(heights["today"], heights["all"])
                 # Use the actual preference control to exercise the native width handshake.
                 window.page().runJavaScript(
                     "$('view-setting').value='compact';"
@@ -598,13 +710,6 @@ class DesktopTests(unittest.TestCase):
                     ["0%", "3%"],
                 )
                 self.assertEqual(source.query.call_count, 2)
-        finally:
-            window.close()
-            window.bridge.close()
-            window.page().deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            window.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_backup_limits_sources_and_failure_redaction(self):
         archive = {"format": "agent-usage", "version": 1, "records": []}

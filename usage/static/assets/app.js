@@ -99,12 +99,6 @@ function weeklyWindows() {
   });
 }
 
-function weeklyRange() {
-  const windows = weeklyWindows();
-  return windows.length ? { start: Math.min(...windows.map(w => w.start)), end: Math.max(...windows.map(w => w.end)) } : null;
-}
-
-
 function agentIcon(agent) {
   const img = el('img', undefined, 'agent-icon'); img.src = 'assets/' + AGENTS[agent].icon; img.alt = ''; img.width = 18; img.height = 18;
   img.dataset.agent = agent; return img;
@@ -175,8 +169,8 @@ function shiftDay(date, offset) {
   const next = new Date(date); next.setDate(next.getDate() + offset); return next;
 }
 
-function bucketKey(start) {
-  return dayKey(new Date(start * 1000));
+function bucketKey(start, agent = '') {
+  return (agent ? agent + ':' : '') + dayKey(new Date(start * 1000));
 }
 
 function bucketSummary(bucket) {
@@ -186,17 +180,27 @@ function bucketSummary(bucket) {
 
 function hideHeatmapTooltip() {
   $('heatmap-tooltip').hidden = true;
-  $('heatmap-grid').querySelector('[aria-describedby]')?.removeAttribute('aria-describedby');
+  $('heatmaps').querySelector('[aria-describedby]')?.removeAttribute('aria-describedby');
 }
 
 function showHeatmapTooltip(cell) {
   const bucket = buckets.get(cell?.dataset.key);
-  if (!bucket || cell.disabled) return;
   hideHeatmapTooltip();
+  if (!bucket || cell.disabled) return;
   const popup = $('heatmap-tooltip');
   popup.replaceChildren(el('p', bucket.label, 'tooltip-date'));
   if (bucket.prompts) popup.append(el('strong', bucket.known ? compact.format(bucket.tokens) + ' tokens' : 'Tokens unavailable'));
   popup.append(el('p', bucketSummary(bucket), 'tooltip-summary'));
+  if (!bucket.agent && agentFilter === 'all') {
+    for (const agent of [...new Set(bucket.rows.map(row => row.agent))]) {
+      const rows = bucket.rows.filter(row => row.agent === agent), known = rows.filter(row => valid(row.tokens));
+      const detail = el('p', undefined, 'tooltip-agent');
+      detail.append(agentIcon(agent), el('span', agent.replace(' Code', '') + ' · '
+        + (known.length ? compact.format(total(known, 'tokens')) + ' tokens' : 'Tokens unavailable')
+        + (known.length < rows.length ? ' · ' + known.length + '/' + rows.length + ' prompts' : '')));
+      popup.append(detail);
+    }
+  }
   popup.hidden = false;
   cell.setAttribute('aria-describedby', popup.id);
   const rect = cell.getBoundingClientRect(), box = popup.getBoundingClientRect();
@@ -204,90 +208,109 @@ function showHeatmapTooltip(cell) {
   popup.style.top = (rect.top >= box.height + 16 ? rect.top - box.height - 10 : rect.bottom + 10) + 'px';
 }
 
-function renderHeatmap(rows, key) {
+function renderHeatmaps(rows) {
   const period = $('period').value, weekly = period === 'weekly', now = new Date();
-  const cycle = weekly ? weeklyRange() : null, strip = weekly;
+  const cycles = weekly ? weeklyWindows() : [{ agent: agentFilter }];
   const today = new Date(now); today.setHours(0, 0, 0, 0);
-  const signature = JSON.stringify([period, agentFilter, cycle, dayKey(today), rows.map(row => [row.id, row.start, row.tokens])]);
-  const grid = $('heatmap-grid'), scroller = $('heatmap-scroll');
+  const signature = JSON.stringify([period, cycles, dayKey(today), rows]);
+  const host = $('heatmaps');
   if (signature !== heatmapSignature) {
-    const previousMode = $('heatmap').dataset.period;
-    const atEnd = scroller.scrollWidth - scroller.scrollLeft - scroller.clientWidth < 4;
-    const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.key : null;
-    const hovered = grid.querySelector('[aria-describedby]')?.dataset.key;
-    heatmapSignature = signature;
-    $('heatmap').dataset.period = period;
-    $('heatmap').dataset.layout = strip ? 'days' : 'weeks';
-    $('heatmap').dataset.agent = agentFilter;
+    const previousMode = host.dataset.period;
+    const scroller = host.querySelector('.heatmap-scroll');
+    const scrollLeft = scroller?.scrollLeft || 0;
+    const atEnd = !scroller || scroller.scrollWidth - scrollLeft - scroller.clientWidth < 4;
+    const focused = host.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+    const hovered = host.querySelector('[aria-describedby]')?.dataset.key;
+    heatmapSignature = signature; host.dataset.period = period;
     buckets = new Map();
     for (const row of rows) {
-      const id = bucketKey(row.start);
-      if (!buckets.has(id)) buckets.set(id, { prompts: 0, known: 0, missing: 0, tokens: 0 });
-      const bucket = buckets.get(id); bucket.prompts++;
+      const id = bucketKey(row.start, weekly ? row.agent : '');
+      if (!buckets.has(id)) buckets.set(id, { rows: [], prompts: 0, known: 0, missing: 0, tokens: 0 });
+      const bucket = buckets.get(id); bucket.prompts++; bucket.rows.push(row);
       if (valid(row.tokens)) { bucket.tokens += row.tokens; bucket.known++; }
       else bucket.missing++;
     }
-    const max = Array.from(buckets.values()).reduce((value, bucket) => Math.max(value, bucket.tokens), 1);
-    const monday = shiftDay(today, -(today.getDay() + 6) % 7);
-    let start = cycle ? new Date(cycle.start * 1000) : shiftDay(monday, -21 * 7);
-    start.setHours(0, 0, 0, 0);
-    if (!cycle && rows.length) {
-      const first = new Date(rows.reduce((value, row) => Math.min(value, row.start), Infinity) * 1000); first.setHours(0, 0, 0, 0);
-      if (first < start) start = shiftDay(first, -(first.getDay() + 6) % 7);
-    }
-    const end = cycle ? new Date((cycle.end - 1) * 1000) : shiftDay(monday, 6);
-    const dates = [];
-    for (let day = start; day <= end; day = shiftDay(day, 1)) dates.push(day);
-    const columns = strip ? dates.length : dates.length / 7;
-    $('heatmap').style.setProperty('--rows', strip ? 1 : 7);
-    grid.style.setProperty('--columns', columns);
-    $('heatmap-axis').style.setProperty('--columns', columns);
-    $('heatmap-labels').replaceChildren(...(strip ? [] : ['M', '', 'W', '', 'F', '', 'S'].map(label => el('span', label))));
-    const axis = [];
-    if (strip) {
-      for (const day of dates) axis.push(el('span', day.toLocaleDateString('en-US', { weekday: 'short' }) + '\n' + day.getDate()));
-    } else {
-      let lastColumn = -3;
-      for (let index = 0; index < dates.length; index++) {
-        const day = dates[index], column = Math.floor(index / 7);
-        if (cycle && (day / 1000 < cycle.start || day / 1000 >= cycle.end)) continue;
-        if ((!axis.length || day.getDate() === 1) && column - lastColumn >= 3) {
-          const label = el('span', day.toLocaleDateString('en-US', { month: 'short' }));
-          label.style.gridColumn = column + 1; axis.push(label); lastColumn = column;
+    // Both strips use the same token scale, while each retains its own reset window.
+    const max = [...buckets.values()].reduce((value, bucket) => Math.max(value, bucket.tokens), 1);
+    const maps = cycles.map(cycle => {
+      const map = $('heatmap-template').content.firstElementChild.cloneNode(true);
+      const part = name => map.querySelector('.heatmap-' + name);
+      map.dataset.layout = weekly ? 'days' : 'weeks'; map.dataset.agent = cycle.agent;
+      if (weekly) {
+        part('heading').hidden = false;
+        part('heading').append(agentIcon(cycle.agent), el('span', cycle.agent.replace(' Code', '')));
+        part('grid').setAttribute('aria-label', cycle.agent + ' current weekly cycle. Recorded tokens per day.');
+      }
+      const monday = shiftDay(today, -(today.getDay() + 6) % 7);
+      let start = weekly ? new Date(cycle.start * 1000) : shiftDay(monday, -21 * 7);
+      start.setHours(0, 0, 0, 0);
+      if (!weekly && rows.length) {
+        const first = new Date(rows.reduce((first, row) => Math.min(first, row.start), Infinity) * 1000); first.setHours(0, 0, 0, 0);
+        if (first < start) start = shiftDay(first, -(first.getDay() + 6) % 7);
+      }
+      const end = weekly ? new Date((cycle.end - 1) * 1000) : shiftDay(monday, 6);
+      const dates = [];
+      for (let day = start; day <= end; day = shiftDay(day, 1)) dates.push(day);
+      map.style.setProperty('--rows', weekly ? 1 : 7);
+      map.style.setProperty('--columns', weekly ? dates.length : dates.length / 7);
+      part('labels').replaceChildren(...(weekly ? [] : ['M', '', 'W', '', 'F', '', 'S'].map(label => el('span', label))));
+      const axis = [];
+      if (weekly) {
+        for (const day of dates) axis.push(el('span', day.toLocaleDateString('en-US', { weekday: 'short' }) + '\n' + day.getDate()));
+      } else {
+        let lastColumn = -3;
+        for (const [index, day] of dates.entries()) {
+          const column = Math.floor(index / 7);
+          if ((!axis.length || day.getDate() === 1) && column - lastColumn >= 3) {
+            const label = el('span', day.toLocaleDateString('en-US', { month: 'short' }));
+            label.style.gridColumn = column + 1; axis.push(label); lastColumn = column;
+          }
         }
       }
+      part('axis').replaceChildren(...axis);
+      for (const day of dates) {
+        const id = bucketKey(day / 1000, weekly ? cycle.agent : '');
+        const bucket = buckets.get(id) || { rows: [], prompts: 0, known: 0, missing: 0, tokens: 0 };
+        bucket.agent = weekly ? cycle.agent : null;
+        bucket.label = (weekly ? cycle.agent.replace(' Code', '') + ' · ' : '')
+          + day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        bucket.disabled = day > today;
+        buckets.set(id, bucket);
+        const cell = el('button', undefined, 'heat-cell'); cell.type = 'button'; cell.tabIndex = -1; cell.dataset.key = id;
+        cell.dataset.level = bucket.tokens ? Math.ceil(bucket.tokens / max * 4) : 0;
+        cell.dataset.unknown = String(bucket.prompts > 0 && !bucket.known);
+        cell.disabled = bucket.disabled;
+        cell.setAttribute('aria-label', bucket.label + '. ' + (bucket.known ? count(bucket.tokens) + ' recorded tokens. ' : '') + bucketSummary(bucket));
+        part('grid').append(cell);
+      }
+      const format = date => date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(weekly ? {} : { year: 'numeric' }) });
+      part('range').textContent = format(weekly ? new Date(cycle.start * 1000) : start) + ' – '
+        + format(weekly ? new Date(cycle.end * 1000) : today);
+      if (weekly) part('range').title = stamp(cycle.start) + ' – ' + stamp(cycle.end);
+      return map;
+    });
+    hideHeatmapTooltip(); heatmapObserver.disconnect(); host.replaceChildren(...maps);
+    for (const map of maps) {
+      const scroller = map.querySelector('.heatmap-scroll');
+      if (!weekly) scroller.scrollLeft = atEnd || previousMode !== period ? scroller.scrollWidth : scrollLeft;
+      heatmapObserver.observe(map.querySelector('.heatmap-grid'));
     }
-    $('heatmap-axis').replaceChildren(...axis);
-    const cells = [];
-    for (const day of dates) {
-      const id = dayKey(day);
-      const bucket = buckets.get(id) || { prompts: 0, known: 0, missing: 0, tokens: 0 };
-      bucket.label = day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-      buckets.set(id, bucket);
-      const cell = el('button', undefined, 'heat-cell'); cell.type = 'button'; cell.tabIndex = -1; cell.dataset.key = id;
-      cell.dataset.level = bucket.tokens ? Math.ceil(bucket.tokens / max * 4) : 0;
-      cell.dataset.unknown = String(bucket.prompts > 0 && !bucket.known);
-      cell.disabled = day > today;
-      cell.setAttribute('aria-label', bucket.label + '. ' + (bucket.known ? count(bucket.tokens) + ' recorded tokens. ' : '') + bucketSummary(bucket));
-      cells.push(cell);
-    }
-    hideHeatmapTooltip();
-    grid.replaceChildren(...cells);
-    const format = date => date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(weekly ? {} : { year: 'numeric' }) });
-    $('heatmap-range').textContent = format(cycle ? new Date(cycle.start * 1000) : start) + ' – '
-      + format(cycle ? new Date((cycle.end - (weekly ? 0 : 1)) * 1000) : today);
-    $('heatmap-range').title = weekly ? weeklyWindows().map(w => w.agent + ': ' + stamp(w.start) + ' – ' + stamp(w.end)).join('\n') : '';
-    if (!strip && (atEnd || previousMode !== period)) scroller.scrollLeft = scroller.scrollWidth;
+    const cells = [...host.querySelectorAll('.heat-cell')];
     if (focused) cells.find(cell => cell.dataset.key === focused)?.focus({ preventScroll: true });
     if (hovered && !focused) showHeatmapTooltip(cells.find(cell => cell.dataset.key === hovered));
   }
-  let selectedCell;
-  for (const cell of grid.children) {
-    const chosen = cell.dataset.key === key;
-    cell.setAttribute('aria-pressed', String(chosen)); cell.tabIndex = chosen ? 0 : -1;
-    if (chosen) selectedCell = cell;
+  if (!buckets.has(bucketId) || buckets.get(bucketId).disabled) bucketId = null;
+  const key = bucketId || bucketKey(rows[0]?.start ?? now / 1000, weekly ? rows[0]?.agent || cycles[0].agent : '');
+  for (const grid of host.querySelectorAll('.heatmap-grid')) {
+    let selectedCell;
+    for (const cell of grid.children) {
+      const chosen = cell.dataset.key === key;
+      cell.setAttribute('aria-pressed', String(chosen)); cell.tabIndex = chosen ? 0 : -1;
+      if (chosen) selectedCell = cell;
+    }
+    if (!selectedCell) grid.querySelector('button:not(:disabled)')?.setAttribute('tabindex', '0');
   }
-  if (!selectedCell) grid.querySelector('button:not(:disabled)')?.setAttribute('tabindex', '0');
+  return key;
 }
 
 function renderHistoryChart(rows, active) {
@@ -307,7 +330,7 @@ function renderHistoryChart(rows, active) {
   if (signature === chartSignature) return;
   chartSignature = signature;
   const agents = [...new Set(rows.map(row => row.agent))];
-  const firstTime = Math.min(...rows.map(row => row.start)), lastTime = Math.max(...rows.map(row => row.start));
+  const firstTime = rows.reduce((first, row) => Math.min(first, row.start), Infinity), lastTime = Math.max(...rows.map(row => row.start));
   const datasets = agents.map(agent => {
     const tone = color(AGENTS[agent].color.slice(2));
     return {
@@ -398,24 +421,18 @@ function renderActivity() {
   if ($('activity').hidden) return;
   const rows = selected(), tokenRows = rows.filter(row => valid(row.tokens));
   const period = $('period').value, heatmap = period !== 'today';
-  const cycle = period === 'weekly' ? weeklyRange() : null;
-  const unavailable = period === 'weekly' && !cycle;
-  if (bucketId && cycle) {
-    const from = new Date(bucketId + 'T00:00:00'), to = shiftDay(from, 1);
-    if (to / 1000 <= cycle.start || from / 1000 >= cycle.end || from > new Date()) bucketId = null;
-  }
-  const key = heatmap ? bucketId || bucketKey(rows[0]?.start ?? Math.min(Date.now() / 1000, cycle?.end - 1 || Infinity)) : null;
-  const detailRows = heatmap ? rows.filter(row => bucketKey(row.start) === key) : rows;
+  const unavailable = period === 'weekly' && !weeklyWindows().length;
+  const key = heatmap && !unavailable ? renderHeatmaps(rows) : null;
+  const detailRows = heatmap ? buckets.get(key)?.rows || [] : rows;
   if (promptId !== null && !detailRows.some(row => row.id === promptId)) promptId = null;
   const active = detailRows.find(row => row.id === promptId) || detailRows[0];
   $('detail-card').hidden = unavailable;
-  $('heatmap').hidden = !heatmap || unavailable;
+  $('heatmaps').hidden = !heatmap || unavailable;
   $('bucket-inspector').hidden = !heatmap || unavailable;
   $('bucket-heading').hidden = !heatmap || unavailable;
   $('weekly-empty').hidden = !unavailable;
   $('prompt-inspector').hidden = heatmap || !active;
-  if (heatmap && !unavailable) renderHeatmap(rows, key);
-  const signature = JSON.stringify([rows, promptId, agentFilter, preferences.project, period, key, cycle]);
+  const signature = JSON.stringify([rows, promptId, agentFilter, preferences.project, period, key]);
   if (signature !== activitySignature) {
     activitySignature = signature;
     $('total-questions').textContent = unavailable ? '—' : count(rows.length);
@@ -443,11 +460,8 @@ function renderActivity() {
   if (period === 'weekly') {
     const windows = weeklyWindows();
     const missing = knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !windows.some(w => w.agent === agent));
-    const notes = [];
-    if (missing.length && !unavailable) notes.push(windows.map(w => w.agent.replace(' Code', '')).join(' + ') + ' cycle only.');
-    if (new Set(windows.map(w => w.start)).size > 1) notes.push("Each agent uses its own cycle.");
-    $('chart-coverage').hidden = !notes.length;
-    $('chart-coverage').textContent = notes.join(' ');
+    $('chart-coverage').hidden = !missing.length || unavailable;
+    $('chart-coverage').textContent = missing.map(agent => agent.replace(' Code', '')).join(', ') + ': weekly cycle unavailable.';
   }
 }
 
@@ -459,14 +473,16 @@ function limitLabel(minutes) {
 function renderLimitOptions() {
   const durations = [...new Set(activeProviders().flatMap(p => p.windows.map(w => w.minutes)))].sort((a, b) => b - a);
   $('visible-limits').hidden = $('indicator-row').hidden = !durations.length;
-  const options = $('limit-options'), signature = JSON.stringify([durations, preferences.hiddenLimits]);
-  if (options.dataset.signature === signature) return;
-  options.dataset.signature = signature;
-  options.replaceChildren(...durations.map(minutes => {
-    const label = el('label'), input = el('input');
-    input.type = 'checkbox'; input.value = minutes; input.checked = !preferences.hiddenLimits.includes(minutes);
-    label.append(input, el('span', limitLabel(minutes))); return label;
-  }));
+  const options = $('limit-options'), signature = JSON.stringify(durations);
+  if (options.dataset.signature !== signature) {
+    options.dataset.signature = signature;
+    options.replaceChildren(...durations.map(minutes => {
+      const label = el('label'), input = el('input');
+      input.type = 'checkbox'; input.value = minutes;
+      label.append(input, el('span', limitLabel(minutes))); return label;
+    }));
+  }
+  for (const input of options.querySelectorAll('input')) input.checked = !preferences.hiddenLimits.includes(Number(input.value));
 }
 
 function quotaIndicator(provider, item, multipleBuckets) {
@@ -716,14 +732,14 @@ document.querySelector('.widget').addEventListener('pointerdown', event => {
 });
 $('widget-close').addEventListener('click', () => native('quit'));
 $('prompt').addEventListener('change', () => { promptId = $('prompt').value || null; renderActivity(); });
-$('heatmap-grid').addEventListener('mouseover', event => showHeatmapTooltip(event.target.closest('button')));
-$('heatmap-grid').addEventListener('focusin', event => showHeatmapTooltip(event.target.closest('button')));
-$('heatmap-grid').addEventListener('mouseleave', hideHeatmapTooltip);
-$('heatmap-grid').addEventListener('focusout', hideHeatmapTooltip);
-$('heatmap-scroll').addEventListener('scroll', hideHeatmapTooltip);
-new ResizeObserver(([entry]) => {
-  $('heatmap-labels').style.height = entry.contentRect.height + 'px';
-}).observe($('heatmap-grid'));
+$('heatmaps').addEventListener('mouseover', event => showHeatmapTooltip(event.target.closest('.heat-cell')));
+$('heatmaps').addEventListener('focusin', event => showHeatmapTooltip(event.target.closest('.heat-cell')));
+$('heatmaps').addEventListener('mouseleave', hideHeatmapTooltip);
+$('heatmaps').addEventListener('focusout', hideHeatmapTooltip);
+$('heatmaps').addEventListener('scroll', hideHeatmapTooltip, true);
+const heatmapObserver = new ResizeObserver(entries => {
+  for (const entry of entries) entry.target.closest('.heatmap').querySelector('.heatmap-labels').style.height = entry.contentRect.height + 'px';
+});
 let layoutRequest = '';
 function reportSize() {
   if (document.documentElement.dataset.layoutView !== preferences.view) return;
@@ -740,16 +756,18 @@ document.querySelectorAll('.panel-content').forEach(content => sizeObserver.obse
 $('settings').addEventListener('close', reportSize);
 window.addEventListener('resize', hideHeatmapTooltip);
 window.addEventListener('scroll', hideHeatmapTooltip);
-$('heatmap-grid').addEventListener('click', event => {
+$('heatmaps').addEventListener('click', event => {
   const cell = event.target.closest('button');
   if (!cell || cell.disabled) return;
   bucketId = cell.dataset.key; promptId = null;
   hideHeatmapTooltip(); renderActivity();
 });
-$('heatmap-grid').addEventListener('keydown', event => {
+$('heatmaps').addEventListener('keydown', event => {
   if (event.key === 'Escape') { hideHeatmapTooltip(); return; }
-  const cells = [...$('heatmap-grid').children], index = cells.indexOf(event.target);
-  const strip = $('heatmap').dataset.layout === 'days';
+  const grid = event.target.closest('.heatmap-grid');
+  if (!grid) return;
+  const cells = [...grid.children], index = cells.indexOf(event.target);
+  const strip = grid.closest('.heatmap').dataset.layout === 'days';
   const step = { ArrowLeft: strip ? -1 : -7, ArrowRight: strip ? 1 : 7, ArrowUp: strip ? 0 : -1, ArrowDown: strip ? 0 : 1 }[event.key];
   if (!step || index < 0) return;
   event.preventDefault();

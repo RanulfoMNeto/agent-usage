@@ -44,9 +44,12 @@ content. **Compact** shows limits; **Normal** adds activity. Click a day in
 Hover previews; clicking selects. Settings controls appearance, warnings, projects
 and sources. The close button quits the app.
 
-**Settings → Limits** chooses which reported limits to show for each agent;
+**Settings → Limits** chooses which reported limits to show across agents;
 **Indicator** switches between bars (default) and rings. Limits share one card
 per agent. These preferences persist locally and do not affect collection.
+In **Both → Weekly**, each agent has its own current reset cycle. Clicking a day
+selects that agent's activity; **History** combines both, with a breakdown on hover.
+Heatmap intensity represents recorded tokens, not subscription percentages.
 
 ## See it in action
 

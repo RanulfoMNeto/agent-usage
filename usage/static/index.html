@@ -38,16 +38,20 @@
           <p class="totals"><strong id="total-questions">—</strong> prompts <span>·</span> <strong id="total-tokens">—</strong> tokens</p>
           <div class="select-field"><select id="period" aria-label="Activity period"><option value="today">Today</option><option value="weekly">Weekly</option><option value="all">History</option></select></div>
         </div>
-        <div id="heatmap" class="heatmap" hidden>
-          <div class="heatmap-layout">
-            <div id="heatmap-labels" class="heatmap-labels" aria-hidden="true"></div>
-            <div id="heatmap-scroll" class="heatmap-scroll">
-              <div id="heatmap-axis" class="heatmap-axis" aria-hidden="true"></div>
-              <div id="heatmap-grid" class="heatmap-grid" role="group" aria-label="Recorded tokens. Hover for totals; click for the day’s chart and totals. Use arrow keys to move between cells."></div>
+        <div id="heatmaps" hidden></div>
+        <template id="heatmap-template">
+          <section class="heatmap">
+            <p class="heatmap-heading" hidden></p>
+            <div class="heatmap-layout">
+              <div class="heatmap-labels" aria-hidden="true"></div>
+              <div class="heatmap-scroll">
+                <div class="heatmap-axis" aria-hidden="true"></div>
+                <div class="heatmap-grid" role="group" aria-label="Recorded tokens. Hover for totals; click for the day’s chart and totals. Use arrow keys to move between cells."></div>
+              </div>
             </div>
-          </div>
-          <div class="heatmap-footer"><span id="heatmap-range"></span><span class="heatmap-legend" title="Recorded tokens relative to the busiest cell in this view.">Less <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> More</span></div>
-        </div>
+            <div class="heatmap-footer"><span class="heatmap-range"></span><span class="heatmap-legend" title="Recorded tokens relative to the busiest cell in this view.">Less <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> More</span></div>
+          </section>
+        </template>
         <p id="chart-coverage" class="caption chart-coverage" hidden></p>
         <p id="weekly-empty" class="empty" hidden>Weekly reset unavailable.</p>
         <div id="detail-card" class="detail-card">
