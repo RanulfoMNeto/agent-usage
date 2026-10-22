@@ -15,7 +15,7 @@ dependencies = ["PySide6-WebEngine==6.12.0.140"]
 agent-usage = "usage.__main__:main"
 
 [dependency-groups]
-dev = ["ruff==0.16.8", "pip-audit==2.9.0"]
+dev = ["ruff==0.17.1", "pip-audit==2.10.1"]
 build = ["pyinstaller==6.22.3"]
 
 [project.urls]
