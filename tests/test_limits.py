@@ -167,7 +167,10 @@ time.sleep(30)
                         self.assertEqual(agent.command(), [str(native)])
                         which.return_value = None
                         native.unlink()
-                custom = home / "custom install" / "codex"
+                # Outside the simulated platforms, the executable name follows the real one.
+                custom = (
+                    home / "custom install" / ("codex.exe" if sys.platform == "win32" else "codex")
+                )
                 custom.parent.mkdir()
                 custom.touch()
                 custom.chmod(0o700)
