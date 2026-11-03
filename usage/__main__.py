@@ -1,4 +1,4 @@
-"""Agent Usage: a persistent local desktop widget."""
+"""Agent Usage: a persistent local desktop widget for coding agents."""
 
 import argparse
 import logging
@@ -16,11 +16,10 @@ def main():
     modes.add_argument(
         "--demo", action="store_true", help="Try fictional data in a temporary profile"
     )
-    modes.add_argument("--capture-claude", action="store_true", help=argparse.SUPPRESS)
     modes.add_argument(
         "--install-gnome",
         action="store_true",
-        help="Install GNOME desktop integration and start at login (GNOME 50)",
+        help="Install the GNOME top bar and desktop integration, starting at login (GNOME 50)",
     )
     modes.add_argument(
         "--uninstall-gnome",
@@ -33,8 +32,8 @@ def main():
             from usage.demo import profile
             from usage.desktop import run
 
-            with profile() as (config, subscriptions):
-                run(config, subscriptions=subscriptions)
+            with profile() as (config, limits):
+                run(config, limits=limits)
             return
         config = load_config(args.config)
         if args.install_gnome or args.uninstall_gnome:
@@ -42,17 +41,6 @@ def main():
 
             print(install_gnome(args.config, remove=args.uninstall_gnome))
             return
-        if args.capture_claude:
-            # Quietly retire commands already loaded by an older Claude terminal.
-            return
-        from usage.integration import remove_legacy_claude_statusline
-
-        try:
-            remove_legacy_claude_statusline()
-        except (OSError, ValueError):
-            logging.warning("Could not remove the legacy Claude status line.")
-        from usage.desktop import run
-
         if sys.platform == "win32" and config["integrations"]["windows_shortcut"]:
             from usage.integration import install_windows_shortcut
 
@@ -60,9 +48,10 @@ def main():
                 install_windows_shortcut(args.config)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 logging.warning("Could not create the Start menu shortcut.")
-        from usage.subscriptions import Subscriptions
+        from usage.desktop import run
+        from usage.limits import Limits
 
-        run(config, subscriptions=Subscriptions(config["subscriptions"]))
+        run(config, limits=Limits(config))
     except (
         OSError,
         ValueError,

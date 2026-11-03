@@ -14,26 +14,23 @@ const confirmed = row => row.status === 'completed' && row.duration_exact && val
 const stamp = value => new Date(value * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const color = name => getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim();
 const charts = {};
-const AGENTS = { Codex: { id: 'codex', icon: 'chatgpt.svg', color: '--codex' }, 'Claude Code': { id: 'claude', icon: 'claude.svg', color: '--claude' } };
-let chartSignature = '';
-let data = null, providers = [], failed = false, subscriptionsLoaded = false, quotaSignature = '';
-let activitySignature = '';
-let heatmapSignature = '', buckets = new Map(), bucketId = null;
-const feeds = { usage: { seconds: 1 }, subscriptions: { seconds: 1 } };
-let agentFilter = 'all', promptId = null;
+// Agent metadata comes from the backend registry; nothing here names a specific agent.
+const agents = new Map();
+let chartSignature = '', activitySignature = '', limitSignature = '', heatmapSignature = '';
+let data = null, accounts = [], failed = false, limitsLoaded = false, topBar = false;
+let buckets = new Map(), bucketId = null, agentFilter = 'all', promptId = null;
+const feeds = { usage: { seconds: 1 }, limits: { seconds: 1 } };
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
-const preferences = { theme: 'dark', limitAlert: 0, period: 'today', view: 'normal', style: 'minimal', pinned: false, project: '', indicator: 'bar', hiddenLimits: [] };
-let sources = null;
+const preferences = { theme: 'dark', limitAlert: 0, period: 'today', style: 'minimal', pinned: false, indicator: 'bar', hiddenLimits: [], details: false };
 const pending = new Map();
 let sequence = 0;
 const backendReady = new Promise(resolve => new QWebChannel(qt.webChannelTransport, channel => {
   const backend = channel.objects.backend;
-  backend.layout_changed.connect((width, scale, compactView) => {
+  backend.layout_changed.connect((width, scale) => {
     const root = document.documentElement;
     root.style.setProperty('--layout-width', width + 'px');
     root.style.setProperty('--layout-scale', scale);
     root.dataset.narrow = String(width <= 360);
-    root.dataset.layoutView = compactView ? 'compact' : 'normal';
     requestAnimationFrame(reportSize);
   });
   backend.reply.connect((id, raw) => {
@@ -54,10 +51,7 @@ function settingsMessage(message = '') {
 
 function applyTheme() {
   document.documentElement.dataset.theme = preferences.theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : preferences.theme;
-  const label = document.documentElement.dataset.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
-  $('theme-toggle').setAttribute('aria-label', label); $('theme-toggle').title = label;
   document.documentElement.dataset.style = preferences.style;
-  document.documentElement.dataset.view = preferences.view;
   document.documentElement.dataset.indicator = preferences.indicator;
 }
 
@@ -65,8 +59,12 @@ function savePreferences() {
   native('save_preferences', preferences).catch(error => settingsMessage(error.message));
 }
 
+function updatePeriod() {
+  for (const button of $('period').children) button.setAttribute('aria-pressed', String(button.dataset.period === preferences.period));
+}
+
 applyTheme();
-$('period').value = preferences.period;
+updatePeriod();
 
 function el(tag, text, className) {
   const node = document.createElement(tag);
@@ -83,77 +81,66 @@ function duration(ms) {
     : Math.floor(seconds / 3600) + ' h ' + Math.floor(seconds % 3600 / 60) + ' min';
 }
 
-function activeProviders() {
-  return providers.map(provider => ({ ...provider, windows: provider.windows.filter(item => item.resets_at > Date.now() / 1000) }))
-    .filter(provider => provider.windows.length);
+const agentName = id => agents.get(id)?.name ?? id;
+const agentColor = id => agents.get(id)?.colors[document.documentElement.dataset.theme === 'dark' ? 1 : 0] || color('neutral');
+
+function agentIcon(id) {
+  const img = el('img', undefined, 'agent-icon'); img.alt = ''; img.width = 18; img.height = 18;
+  img.src = agents.get(id)?.icon || 'assets/widget.svg';
+  img.dataset.monochrome = String(agents.get(id)?.monochrome === true);
+  return img;
+}
+
+function activeAccounts() {
+  return accounts.filter(account => agents.has(account.id))
+    .map(account => ({ ...account, windows: account.windows.filter(item => item.resets_at > Date.now() / 1000) }))
+    .filter(account => account.windows.length);
 }
 
 function knownAgents() {
-  return [...new Set([...activeProviders().map(p => p.agent), ...(data?.rows || []).map(r => r.agent)])].filter(a => AGENTS[a]).sort();
+  const seen = new Set([...activeAccounts().map(account => account.id), ...(data?.rows || []).map(row => row.agent)]);
+  return [...agents.keys()].filter(id => seen.has(id));
 }
 
 function weeklyWindows() {
-  return activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter).flatMap(provider => {
-    const item = provider.windows.find(w => w.minutes === 10080 && w.resets_at - w.minutes * 60 <= Date.now() / 1000);
-    return item ? [{ agent: provider.agent, start: item.resets_at - item.minutes * 60, end: item.resets_at }] : [];
+  return activeAccounts().filter(account => agentFilter === 'all' || account.id === agentFilter).flatMap(account => {
+    const item = account.windows.find(w => w.minutes === 10080 && w.resets_at - w.minutes * 60 <= Date.now() / 1000);
+    return item ? [{ agent: account.id, start: item.resets_at - item.minutes * 60, end: item.resets_at }] : [];
   });
 }
 
-function agentIcon(agent) {
-  const img = el('img', undefined, 'agent-icon'); img.src = 'assets/' + AGENTS[agent].icon; img.alt = ''; img.width = 18; img.height = 18;
-  img.dataset.agent = agent; return img;
-}
-
 function updateAgents() {
-  const agents = knownAgents();
-  if (agentFilter !== 'all' && !agents.includes(agentFilter)) { agentFilter = 'all'; promptId = null; bucketId = null; }
+  const known = knownAgents();
+  if (agentFilter !== 'all' && !known.includes(agentFilter)) { agentFilter = 'all'; promptId = null; bucketId = null; }
   const tabs = $('agents');
-  if (tabs.dataset.options !== JSON.stringify(agents)) {
+  if (tabs.dataset.options !== JSON.stringify(known)) {
     tabs.replaceChildren();
-    for (const agent of agents.length > 1 ? ['all', ...agents] : []) {
-      const button = el('button'); button.type = 'button'; button.dataset.agent = agent;
-      button.title = agent === 'all' ? 'Both agents' : agent;
+    for (const id of known.length > 1 ? ['all', ...known] : []) {
+      const button = el('button'); button.type = 'button'; button.dataset.agent = id;
+      button.title = id === 'all' ? 'All agents' : agentName(id);
       button.setAttribute('aria-label', button.title);
-      if (agent !== 'all') button.append(agentIcon(agent));
-      button.append(el('span', agent === 'all' ? 'Both' : agent.replace(' Code', '')));
-      button.addEventListener('click', () => { agentFilter = agent; promptId = null; bucketId = null; render(); });
+      if (id === 'all') button.append(el('span', 'All'));
+      else button.append(agentIcon(id));
+      button.addEventListener('click', () => { agentFilter = id; promptId = null; bucketId = null; render(); });
       tabs.append(button);
     }
-    tabs.dataset.options = JSON.stringify(agents);
+    tabs.dataset.options = JSON.stringify(known);
   }
   for (const button of tabs.children) button.setAttribute('aria-pressed', String(button.dataset.agent === agentFilter));
-  tabs.hidden = agents.length < 2;
-  $('dashboard-empty').hidden = agents.length > 0;
-  $('dashboard-empty').textContent = (data || failed) && subscriptionsLoaded ? 'No agent usage data available.' : 'Loading usage…';
-}
-
-function agentRows() {
-  return (data?.rows || []).filter(row => (agentFilter === 'all' || row.agent === agentFilter) && (
-    !preferences.project || row.project === preferences.project ||
-      row.project?.startsWith(preferences.project.replace(/\/$/, '') + '/')
-  ));
-}
-
-function updateProjects() {
-  const path = preferences.project;
-  const label = path || 'All projects';
-  $('project').querySelector('span').textContent = label;
-  $('project').title = path ? label : 'Choose a repository folder to filter activity';
-  $('project-reset').hidden = !path;
-  $('project-scope').hidden = !path;
-  $('project-scope').textContent = path.split('/').filter(Boolean).at(-1) || '/';
-  $('project-scope').title = label + ' · Subscription limits apply to the whole account';
+  tabs.hidden = known.length < 2;
+  $('dashboard-empty').hidden = known.length > 0;
+  $('dashboard-empty').textContent = (data || failed) && limitsLoaded ? 'No agent usage yet.' : 'Loading…';
 }
 
 function selected() {
+  const rows = (data?.rows || []).filter(row => agentFilter === 'all' || row.agent === agentFilter);
   const start = new Date(); start.setHours(0, 0, 0, 0);
-  const period = $('period').value;
-  const cutoff = period === 'all' ? 0 : start.getTime() / 1000;
-  if (period === 'weekly') {
+  if (preferences.period === 'weekly') {
     const windows = weeklyWindows();
-    return agentRows().filter(row => row.start <= Date.now() / 1000 && windows.some(w => w.agent === row.agent && row.start >= w.start && row.start < w.end));
+    return rows.filter(row => row.start <= Date.now() / 1000 && windows.some(w => w.agent === row.agent && row.start >= w.start && row.start < w.end));
   }
-  return agentRows().filter(row => row.start >= cutoff && row.start <= Date.now() / 1000);
+  const cutoff = preferences.period === 'all' ? 0 : start.getTime() / 1000;
+  return rows.filter(row => row.start >= cutoff && row.start <= Date.now() / 1000);
 }
 
 function promptLabel(row, limit = 64) {
@@ -175,7 +162,7 @@ function bucketKey(start, agent = '') {
 
 function bucketSummary(bucket) {
   const prompts = count(bucket.prompts) + (bucket.prompts === 1 ? ' prompt' : ' prompts');
-  return !bucket.prompts ? 'No recorded prompts' : prompts + (bucket.missing ? ' · ' + count(bucket.missing) + ' without token data' : '');
+  return !bucket.prompts ? 'No prompts' : prompts + (bucket.missing ? ' · ' + count(bucket.missing) + ' without tokens' : '');
 }
 
 function hideHeatmapTooltip() {
@@ -195,9 +182,8 @@ function showHeatmapTooltip(cell) {
     for (const agent of [...new Set(bucket.rows.map(row => row.agent))]) {
       const rows = bucket.rows.filter(row => row.agent === agent), known = rows.filter(row => valid(row.tokens));
       const detail = el('p', undefined, 'tooltip-agent');
-      detail.append(agentIcon(agent), el('span', agent.replace(' Code', '') + ' · '
-        + (known.length ? compact.format(total(known, 'tokens')) + ' tokens' : 'Tokens unavailable')
-        + (known.length < rows.length ? ' · ' + known.length + '/' + rows.length + ' prompts' : '')));
+      detail.append(agentIcon(agent), el('span', agentName(agent) + ' · '
+        + (known.length ? compact.format(total(known, 'tokens')) + ' tokens' : 'Tokens unavailable')));
       popup.append(detail);
     }
   }
@@ -209,10 +195,10 @@ function showHeatmapTooltip(cell) {
 }
 
 function renderHeatmaps(rows) {
-  const period = $('period').value, weekly = period === 'weekly', now = new Date();
+  const period = preferences.period, weekly = period === 'weekly', now = new Date();
   const cycles = weekly ? weeklyWindows() : [{ agent: agentFilter }];
   const today = new Date(now); today.setHours(0, 0, 0, 0);
-  const signature = JSON.stringify([period, cycles, dayKey(today), rows]);
+  const signature = JSON.stringify([period, cycles, dayKey(today), rows, document.documentElement.dataset.theme]);
   const host = $('heatmaps');
   if (signature !== heatmapSignature) {
     const previousMode = host.dataset.period;
@@ -230,16 +216,17 @@ function renderHeatmaps(rows) {
       if (valid(row.tokens)) { bucket.tokens += row.tokens; bucket.known++; }
       else bucket.missing++;
     }
-    // Both strips use the same token scale, while each retains its own reset window.
+    // Every strip shares one token scale, while each keeps its own reset window.
     const max = [...buckets.values()].reduce((value, bucket) => Math.max(value, bucket.tokens), 1);
     const maps = cycles.map(cycle => {
       const map = $('heatmap-template').content.firstElementChild.cloneNode(true);
       const part = name => map.querySelector('.heatmap-' + name);
-      map.dataset.layout = weekly ? 'days' : 'weeks'; map.dataset.agent = cycle.agent;
+      map.dataset.layout = weekly ? 'days' : 'weeks';
+      if (cycle.agent !== 'all') map.style.setProperty('--heat', agentColor(cycle.agent));
       if (weekly) {
         part('heading').hidden = false;
-        part('heading').append(agentIcon(cycle.agent), el('span', cycle.agent.replace(' Code', '')));
-        part('grid').setAttribute('aria-label', cycle.agent + ' current weekly cycle. Recorded tokens per day.');
+        part('heading').append(agentIcon(cycle.agent), el('span', agentName(cycle.agent)));
+        part('grid').setAttribute('aria-label', agentName(cycle.agent) + ' current weekly cycle. Recorded tokens per day.');
       }
       const monday = shiftDay(today, -(today.getDay() + 6) % 7);
       let start = weekly ? new Date(cycle.start * 1000) : shiftDay(monday, -21 * 7);
@@ -272,7 +259,7 @@ function renderHeatmaps(rows) {
         const id = bucketKey(day / 1000, weekly ? cycle.agent : '');
         const bucket = buckets.get(id) || { rows: [], prompts: 0, known: 0, missing: 0, tokens: 0 };
         bucket.agent = weekly ? cycle.agent : null;
-        bucket.label = (weekly ? cycle.agent.replace(' Code', '') + ' · ' : '')
+        bucket.label = (weekly ? agentName(cycle.agent) + ' · ' : '')
           + day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
         bucket.disabled = day > today;
         buckets.set(id, bucket);
@@ -317,24 +304,17 @@ function renderHistoryChart(rows, active) {
   const available = rows.some(row => valid(row.tokens));
   $('usage-chart').hidden = !available || typeof Chart === 'undefined';
   $('usage-empty').hidden = available && typeof Chart !== 'undefined';
-  $('usage-empty').textContent = rows.length ? 'No token data' : 'No recorded prompts';
-  const known = rows.filter(row => valid(row.tokens)).length;
-  const missing = rows.length - known;
-  $('line-coverage').style.visibility = missing && available ? '' : 'hidden';
-  $('line-coverage').textContent = missing ? 'Gaps: ' + missing + (missing === 1 ? ' prompt' : ' prompts') + ' without token data.' : '';
-  $('selection-key').hidden = !active;
-  $('selection-key').dataset.missing = String(!valid(active?.tokens));
-  $('selection-key').textContent = valid(active?.tokens) ? 'Selected' : 'Selected: no token data';
+  $('usage-empty').textContent = rows.length ? 'No token data' : 'No prompts';
   if (!available || typeof Chart === 'undefined') { chartSignature = ''; return; }
   const signature = JSON.stringify([rows.map(r => [r.id, r.agent, r.start, r.tokens, r.title]), active?.id, document.documentElement.dataset.theme, preferences.style]);
   if (signature === chartSignature) return;
   chartSignature = signature;
-  const agents = [...new Set(rows.map(row => row.agent))];
+  const shown = [...new Set(rows.map(row => row.agent))];
   const firstTime = rows.reduce((first, row) => Math.min(first, row.start), Infinity), lastTime = Math.max(...rows.map(row => row.start));
-  const datasets = agents.map(agent => {
-    const tone = color(AGENTS[agent].color.slice(2));
+  const datasets = shown.map(agent => {
+    const tone = agentColor(agent);
     return {
-      label: agent, data: rows.filter(row => row.agent === agent).slice().reverse().map(row => ({ x: row.start, y: row.tokens, id: row.id, title: row.title })),
+      label: agentName(agent), data: rows.filter(row => row.agent === agent).slice().reverse().map(row => ({ x: row.start, y: row.tokens, id: row.id, title: row.title })),
       borderColor: tone, borderWidth: Number(color('chart-width')), fill: false, clip: false,
       tension: 0, spanGaps: false,
       pointRadius: context => context.raw?.id === active?.id ? 3.5 : 2.5,
@@ -355,7 +335,7 @@ function renderHistoryChart(rows, active) {
       renderActivity();
     },
     plugins: {
-      legend: { display: agents.length > 1, labels: { usePointStyle: true, boxWidth: 5, boxHeight: 5, font: { size: 9 }, color: color('muted') } },
+      legend: { display: shown.length > 1, labels: { usePointStyle: true, boxWidth: 5, boxHeight: 5, font: { size: 9 }, color: color('muted') } },
       tooltip: {
         displayColors: false, backgroundColor: color('surface'), titleColor: color('muted'), bodyColor: color('text'),
         titleFont: { size: 9, weight: 'normal' }, bodyFont: { size: 11, weight: '600' },
@@ -363,7 +343,7 @@ function renderHistoryChart(rows, active) {
         callbacks: {
           title: items => promptLabel(items[0].raw, 32),
           label: item => compact.format(item.parsed.y) + ' tokens',
-          footer: items => stamp(items[0].parsed.x) + (agents.length > 1 ? ' · ' + items[0].dataset.label.replace(' Code', '') : ''),
+          footer: items => stamp(items[0].parsed.x) + (shown.length > 1 ? ' · ' + items[0].dataset.label : ''),
         },
         footerColor: color('muted'), footerFont: { size: 8, weight: 'normal' }, footerMarginTop: 5,
       },
@@ -384,43 +364,34 @@ function renderHistoryChart(rows, active) {
 }
 
 function renderPrompt(row) {
-  $('prompt-inspector').hidden = !row;
   $('prompt-detail').hidden = !row;
-  $('cost-note').style.visibility = !row || !valid(row.cost) ? 'hidden' : '';
   if (!row) return;
   $('prompt-cost').textContent = costLabel(row.cost);
-  $('prompt-cost').title = valid(row.cost) ? '$' + money(row.cost) : 'Cost unavailable';
-  const costBasis = (row.cost_basis || 'API estimate') + '; not subscription billing' + (row.status === 'running' ? '; recorded so far' : '');
-  $('cost-label').title = costBasis;
-  $('cost-label').setAttribute('aria-label', costBasis);
+  $('prompt-cost').title = valid(row.cost) ? '$' + money(row.cost) : '';
   $('prompt-tokens').textContent = valid(row.tokens) ? compact.format(row.tokens) : '—';
   $('prompt-tokens').title = count(row.tokens) + ' tokens';
   $('prompt-duration').textContent = confirmed(row) ? duration(row.duration_ms).replaceAll(' min ', 'm ').replaceAll(' s', 's').replaceAll(' h ', 'h ') : row.status === 'running' ? 'Running' : '—';
-  $('prompt-duration').title = confirmed(row) ? 'Confirmed duration' : 'Duration not confirmed';
 }
 
-function renderBucket(rows, key) {
-  const bucket = buckets.get(key), knownTokens = rows.filter(row => valid(row.tokens)), knownCosts = rows.filter(row => valid(row.cost));
-  $('bucket-title').textContent = bucket?.label || 'No recorded activity';
-  $('bucket-detail').hidden = false;
+// A day is one summary line; its chart and prompts open below on request.
+function renderBucket(rows, label) {
+  const knownTokens = rows.filter(row => valid(row.tokens)), knownCosts = rows.filter(row => valid(row.cost));
+  $('bucket-title').textContent = label || 'No activity';
   $('bucket-prompts').textContent = count(rows.length);
+  $('bucket-prompt-unit').textContent = rows.length === 1 ? 'prompt' : 'prompts';
   $('bucket-tokens').textContent = knownTokens.length ? compact.format(total(knownTokens, 'tokens')) : '—';
-  $('bucket-tokens').title = knownTokens.length ? count(total(knownTokens, 'tokens')) + ' recorded tokens' : 'Token data unavailable';
+  $('bucket-tokens').title = count(total(knownTokens, 'tokens')) + ' tokens';
+  $('bucket-tokens').parentElement.hidden = !knownTokens.length;
   $('bucket-cost').textContent = costLabel(knownCosts.length ? total(knownCosts, 'cost') : null);
-  $('bucket-cost').title = knownCosts.length ? '$' + money(total(knownCosts, 'cost')) + ' API estimate; not subscription billing' : 'Cost estimate unavailable';
-  for (const [id, known] of [['bucket-token-coverage', knownTokens], ['bucket-cost-coverage', knownCosts]]) {
-    $(id).hidden = !rows.length || known.length === rows.length;
-    $(id).textContent = count(known.length) + '/' + count(rows.length) + ' prompts';
-    $(id).title = 'Prompts with recorded data for this metric';
-  }
-  $('bucket-cost-note').style.visibility = knownCosts.length ? '' : 'hidden';
+  $('bucket-cost').title = '$' + money(total(knownCosts, 'cost'));
+  $('bucket-cost').parentElement.hidden = !knownCosts.length;
 }
 
 function renderActivity() {
-  $('activity').hidden = preferences.view === 'compact' || !data?.rows?.length;
+  $('activity').hidden = !data?.rows?.length;
   if ($('activity').hidden) return;
   const rows = selected(), tokenRows = rows.filter(row => valid(row.tokens));
-  const period = $('period').value, heatmap = period !== 'today';
+  const period = preferences.period, heatmap = period !== 'today';
   const unavailable = period === 'weekly' && !weeklyWindows().length;
   const key = heatmap && !unavailable ? renderHeatmaps(rows) : null;
   const detailRows = heatmap ? buckets.get(key)?.rows || [] : rows;
@@ -428,20 +399,20 @@ function renderActivity() {
   const active = detailRows.find(row => row.id === promptId) || detailRows[0];
   $('detail-card').hidden = unavailable;
   $('heatmaps').hidden = !heatmap || unavailable;
-  $('bucket-inspector').hidden = !heatmap || unavailable;
-  $('bucket-heading').hidden = !heatmap || unavailable;
   $('weekly-empty').hidden = !unavailable;
+  // Today's totals are its summary line.
+  $('totals').hidden = !heatmap;
   $('prompt-inspector').hidden = heatmap || !active;
-  const signature = JSON.stringify([rows, promptId, agentFilter, preferences.project, period, key]);
+  $('detail-body').hidden = !preferences.details;
+  $('detail-toggle').setAttribute('aria-expanded', String(preferences.details));
+  const signature = JSON.stringify([rows, promptId, agentFilter, period, key, document.documentElement.dataset.theme]);
   if (signature !== activitySignature) {
     activitySignature = signature;
     $('total-questions').textContent = unavailable ? '—' : count(rows.length);
     $('total-tokens').textContent = tokenRows.length ? compact.format(total(tokenRows, 'tokens')) : '—';
-    $('total-tokens').title = count(total(tokenRows, 'tokens')) + ' recorded tokens';
-    if (heatmap) {
-      if (!unavailable) renderBucket(detailRows, key);
-    }
-    else {
+    $('total-tokens').title = count(total(tokenRows, 'tokens')) + ' tokens';
+    if (!unavailable) renderBucket(detailRows, heatmap ? buckets.get(key)?.label : 'Today');
+    if (!heatmap) {
       const picker = $('prompt');
       const options = JSON.stringify(rows.map(row => [row.id, row.title, row.start]));
       if (picker.dataset.options !== options) {
@@ -450,19 +421,12 @@ function renderActivity() {
         picker.dataset.options = options;
       }
       picker.value = promptId || '';
-      picker.title = active ? stamp(active.start) + ' · ' + active.agent + ' · ' + promptLabel(active) : '';
+      picker.title = active ? stamp(active.start) + ' · ' + agentName(active.agent) + ' · ' + promptLabel(active) : '';
       picker.disabled = !rows.length;
       renderPrompt(active);
     }
   }
   if (!unavailable) renderHistoryChart(detailRows, active);
-  $('chart-coverage').hidden = true;
-  if (period === 'weekly') {
-    const windows = weeklyWindows();
-    const missing = knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !windows.some(w => w.agent === agent));
-    $('chart-coverage').hidden = !missing.length || unavailable;
-    $('chart-coverage').textContent = missing.map(agent => agent.replace(' Code', '')).join(', ') + ': weekly cycle unavailable.';
-  }
 }
 
 function limitLabel(minutes) {
@@ -470,9 +434,17 @@ function limitLabel(minutes) {
     : minutes % 60 === 0 ? minutes / 60 + '-hour' : minutes + '-minute';
 }
 
+function countdown(item) {
+  const remaining = Math.max(0, Math.ceil((item.resets_at - Date.now() / 1000) / 60));
+  return remaining >= 1440 ? Math.floor(remaining / 1440) + 'd ' + Math.floor(remaining % 1440 / 60) + 'h'
+    : remaining >= 60 ? Math.floor(remaining / 60) + 'h ' + remaining % 60 + 'm' : remaining + 'm';
+}
+
 function renderLimitOptions() {
-  const durations = [...new Set(activeProviders().flatMap(p => p.windows.map(w => w.minutes)))].sort((a, b) => b - a);
-  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length;
+  const durations = [...new Set(activeAccounts().flatMap(account => account.windows.map(w => w.minutes)))].sort((a, b) => b - a);
+  // With the top bar showing limits, the widget's own limit display has nothing to configure.
+  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length || topBar;
+  $('limit-setting').hidden = !durations.length;
   const options = $('limit-options'), signature = JSON.stringify(durations);
   if (options.dataset.signature !== signature) {
     options.dataset.signature = signature;
@@ -485,14 +457,11 @@ function renderLimitOptions() {
   for (const input of options.querySelectorAll('input')) input.checked = !preferences.hiddenLimits.includes(Number(input.value));
 }
 
-function quotaIndicator(provider, item, multipleBuckets) {
-  const node = el('div', undefined, 'quota-limit'); node.dataset.minutes = item.minutes;
-  const label = (multipleBuckets ? item.name + ' · ' : '') + limitLabel(item.minutes) + ' limit';
-  const remaining = Math.max(0, Math.ceil((item.resets_at - Date.now() / 1000) / 60));
-  const countdown = remaining >= 1440 ? Math.floor(remaining / 1440) + 'd ' + Math.floor(remaining % 1440 / 60) + 'h'
-    : remaining >= 60 ? Math.floor(remaining / 60) + 'h ' + remaining % 60 + 'm' : remaining + 'm';
-  const gauge = el('div', undefined, 'quota-gauge');
-  gauge.setAttribute('role', 'meter'); gauge.setAttribute('aria-label', provider.agent + ' · ' + label);
+function limitIndicator(account, item, buckets) {
+  const node = el('div', undefined, 'limit'); node.dataset.minutes = item.minutes;
+  const label = (buckets ? item.bucket + ' · ' : '') + limitLabel(item.minutes) + ' limit';
+  const gauge = el('div', undefined, 'limit-gauge');
+  gauge.setAttribute('role', 'meter'); gauge.setAttribute('aria-label', agentName(account.id) + ' · ' + label);
   gauge.setAttribute('aria-valuemin', '0'); gauge.setAttribute('aria-valuemax', '100');
   gauge.setAttribute('aria-valuenow', item.used_percent); gauge.setAttribute('aria-valuetext', percent.format(item.used_percent) + '% used');
   gauge.style.setProperty('--used', item.used_percent + '%');
@@ -503,135 +472,152 @@ function quotaIndicator(provider, item, multipleBuckets) {
     if (name === 'fill') { circle.style.strokeDashoffset = 100 - item.used_percent; circle.style.visibility = item.used_percent === 0 ? 'hidden' : ''; }
     svg.append(circle);
   }
-  const value = el('div', undefined, 'quota-value');
-  value.append(el('strong', percent.format(item.used_percent) + '%', 'quota-percent'), el('span', 'used', 'quota-unit'));
+  const value = el('div', undefined, 'limit-value');
+  value.append(el('strong', percent.format(item.used_percent) + '%', 'limit-percent'), el('span', 'used', 'limit-unit'));
   gauge.append(svg, value);
-  const reset = el('time', 'Resets in ' + countdown, 'quota-reset'); reset.dateTime = new Date(item.resets_at * 1000).toISOString();
+  const reset = el('time', 'Resets in ' + countdown(item), 'limit-reset'); reset.dateTime = new Date(item.resets_at * 1000).toISOString();
   reset.title = 'Resets ' + new Date(item.resets_at * 1000).toLocaleString('en-US', { timeZoneName: 'short' });
-  const info = el('div', undefined, 'quota-info'); info.append(el('p', label, 'quota-label'), reset);
-  if (preferences.limitAlert && provider.status === 'available' && item.used_percent >= preferences.limitAlert) {
+  const info = el('div', undefined, 'limit-info'); info.append(el('p', label, 'limit-label'), reset);
+  if (preferences.limitAlert && account.status === 'available' && item.used_percent >= preferences.limitAlert) {
     node.dataset.warning = 'true';
-    info.append(el('span', item.used_percent >= 100 ? 'Limit reached' : 'Near limit', 'quota-warning'));
+    info.append(el('span', item.used_percent >= 100 ? 'Limit reached' : 'Near limit', 'limit-warning'));
   }
   node.append(gauge, info); return node;
 }
 
-function quotaCard(provider, windows) {
-  const card = el('article', undefined, 'quota-card'); card.dataset.state = provider.status; card.dataset.agent = provider.agent;
-  const brand = el('p', undefined, 'quota-brand'); brand.append(agentIcon(provider.agent), el('span', provider.agent.replace(' Code', '')));
-  if (provider.status === 'stale') brand.append(el('span', 'Outdated', 'quota-stale'));
-  const limits = el('div', undefined, 'quota-limits');
-  const multipleBuckets = new Set(windows.map(item => item.name)).size > 1;
-  limits.append(...windows.map(item => quotaIndicator(provider, item, multipleBuckets)));
-  card.append(brand, limits);
-  card.title = 'Last reported ' + (valid(provider.updated_at) ? stamp(provider.updated_at) : 'unknown');
+function limitCard(account, windows) {
+  const card = el('article', undefined, 'limit-card'); card.dataset.state = account.status; card.dataset.agent = account.id;
+  card.style.setProperty('--accent', agentColor(account.id));
+  const brand = el('p', undefined, 'limit-brand'); brand.append(agentIcon(account.id), el('span', agentName(account.id)));
+  if (account.status === 'stale') brand.append(el('span', 'Outdated', 'limit-stale'));
+  const list = el('div', undefined, 'limit-list');
+  const buckets = new Set(windows.map(item => item.bucket)).size > 1;
+  list.append(...windows.map(item => limitIndicator(account, item, buckets)));
+  card.append(brand, list);
+  card.title = 'Last reported ' + (valid(account.updated_at) ? stamp(account.updated_at) : 'unknown');
   return card;
 }
 
-for (const [agent, info] of Object.entries(AGENTS)) {
-  const card = el('article', undefined, 'agent-card');
-  const header = el('div', undefined, 'agent-connection');
-  const identity = el('div'), label = el('span', undefined, 'source-label');
-  label.append(agentIcon(agent), el('span', agent.replace(' Code', '')));
-  const status = el('span', 'Checking…', 'caption'); status.id = info.id + '-connection'; status.setAttribute('role', 'status');
-  identity.append(label, status);
-  const action = el('button', 'Connect', 'setting-action'); action.dataset.connect = info.id;
-  header.append(identity, action);
-  const source = el('details', undefined, 'agent-source'); source.id = 'source-details-' + info.id;
-  const summary = el('summary', 'History folder');
-  const reset = el('button', 'Reset', 'text-button source-reset'); reset.dataset.default = info.id; reset.hidden = true;
-  const folder = el('button', undefined, 'source-path'); folder.id = 'source-' + info.id; folder.dataset.source = info.id; folder.disabled = true;
-  folder.setAttribute('aria-label', 'Choose ' + agent + ' session directory');
-  folder.innerHTML = '<span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg>';
-  const empty = el('p', 'No session files found', 'caption source-empty'); empty.id = 'source-empty-' + info.id; empty.hidden = true;
-  source.append(summary, reset, folder, empty); card.append(header, source); $('agent-settings').append(card);
-}
 const CONNECTION_MESSAGES = {
-  disconnected: ['Disconnected', 'Monitoring is paused. Your agent login and collected history are kept.'],
-  not_found: ['Not installed', 'Install the agent or its official VS Code extension in this environment.'],
-  login_required: ['Not connected', 'Connect to sign in with your agent subscription.'],
-  unsupported_account: ['Subscription required', 'API-key accounts do not provide subscription limits.'],
-  login_cancelled: ['Connection cancelled', 'No new connection was established.'],
-  timeout: ['Connection timed out', 'Try connecting again.'],
-  query_failed: ['Limits unavailable', 'The native account query failed.'],
-  unsupported_version: ['Update Claude Code', 'The installed Claude Code does not support native usage queries.'],
+  disconnected: ['Disconnected', () => 'Monitoring is paused. Login and history are kept.'],
+  not_found: ['Not installed', name => 'Install ' + name + ' in this environment.'],
+  login_required: ['Not connected', () => 'Connect to sign in with your subscription.'],
+  unsupported_account: ['Subscription required', () => 'API-key accounts do not report subscription limits.'],
+  login_cancelled: ['Connection cancelled', () => 'No new connection was established.'],
+  timeout: ['Connection timed out', () => 'Try connecting again.'],
+  query_failed: ['Limits unavailable', () => 'The account query failed.'],
+  unsupported_version: [name => 'Update ' + name, () => 'This version does not report usage limits.'],
 };
-function connectionMessage(provider) {
-  if (provider?.windows?.length) return [provider.status === 'stale' ? 'Last reading outdated' : 'Connected', ''];
-  return CONNECTION_MESSAGES[provider?.issue] || ['Limits unavailable', 'No current account limits were reported.'];
+function connectionMessage(account, id) {
+  if (account?.windows?.length) return [account.status === 'stale' ? 'Last reading outdated' : 'Connected', ''];
+  const [label, hint] = CONNECTION_MESSAGES[account?.issue] || ['Limits unavailable', () => 'No current limits were reported.'];
+  const name = agentName(id);
+  return [typeof label === 'function' ? label(name) : label, hint(name)];
 }
 let connectionTask = null, cancelling = false, connectionRevision = 0;
 function renderConnections() {
-  for (const [agent, {id}] of Object.entries(AGENTS)) {
-    const provider = providers.find(p => p.agent === agent);
-    const [label, hint] = connectionMessage(provider);
+  for (const id of agents.keys()) {
+    const account = accounts.find(entry => entry.id === id);
+    const [label, hint] = connectionMessage(account, id);
     const busy = connectionTask?.agent === id;
-    $(id + '-connection').textContent = busy ? (connectionTask.method === 'disconnect' ? 'Disconnecting…' : 'Connecting…') : subscriptionsLoaded ? label : 'Checking…';
-    $(id + '-connection').title = hint;
+    $('connection-' + id).textContent = busy ? (connectionTask.method === 'disconnect' ? 'Disconnecting…' : 'Connecting…') : limitsLoaded ? label : 'Checking…';
+    $('connection-' + id).title = hint;
     const button = document.querySelector('[data-connect="' + id + '"]');
-    const canCancel = busy && connectionTask.method === 'connect' && id === 'codex';
+    const canCancel = busy && connectionTask.method === 'connect';
     button.disabled = !!connectionTask && (!canCancel || cancelling);
-    button.textContent = canCancel ? 'Cancel' : (provider?.connected ?? !!provider?.windows?.length) ? 'Disconnect' : 'Connect';
-    button.title = provider?.connected ? 'Pause monitoring; keep login and history' : 'Start monitoring';
+    button.textContent = canCancel ? 'Cancel' : (account?.connected ?? !!account?.windows?.length) ? 'Disconnect' : 'Connect';
+    button.title = account?.connected ? 'Pause monitoring; keep login and history' : 'Start monitoring';
   }
 }
+
+function buildAgentSettings() {
+  const section = $('agent-settings');
+  section.querySelectorAll('.agent-card').forEach(card => card.remove());
+  for (const id of agents.keys()) {
+    const card = el('article', undefined, 'agent-card');
+    const header = el('div', undefined, 'agent-connection');
+    const identity = el('div'), label = el('span', undefined, 'source-label');
+    label.append(agentIcon(id), el('span', agentName(id)));
+    const status = el('span', 'Checking…', 'caption'); status.id = 'connection-' + id; status.setAttribute('role', 'status');
+    identity.append(label, status);
+    const action = el('button', 'Connect', 'setting-action'); action.dataset.connect = id;
+    header.append(identity, action);
+    const source = el('details', undefined, 'agent-source'); source.id = 'source-details-' + id;
+    const reset = el('button', 'Reset', 'text-button source-reset'); reset.dataset.default = id; reset.hidden = true;
+    const folder = el('button', undefined, 'source-path'); folder.id = 'source-' + id; folder.dataset.source = id; folder.disabled = true;
+    folder.setAttribute('aria-label', 'Choose ' + agentName(id) + ' history directory');
+    folder.innerHTML = '<span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg>';
+    const empty = el('p', 'No session files found', 'caption source-empty'); empty.id = 'source-empty-' + id; empty.hidden = true;
+    source.append(el('summary', 'History folder'), reset, folder, empty); card.append(header, source); section.append(card);
+  }
+}
+
 $('agent-settings').addEventListener('click', async event => {
-  const button = event.target.closest('[data-connect]');
+  const button = event.target.closest('button');
   if (!button) return;
-  const agent = button.dataset.connect;
-  settingsMessage();
-  if (connectionTask) {
-    if (agent !== 'codex' || connectionTask.agent !== agent || connectionTask.method !== 'connect') return;
-    cancelling = true; renderConnections();
-    try { await native('cancel_login', agent); } catch (error) { settingsMessage(error.message); }
+  if (button.dataset.connect) {
+    const agent = button.dataset.connect;
+    settingsMessage();
+    if (connectionTask) {
+      if (connectionTask.agent !== agent || connectionTask.method !== 'connect') return;
+      cancelling = true; renderConnections();
+      try { await native('cancel_login', agent); } catch (error) { settingsMessage(error.message); }
+      return;
+    }
+    const account = accounts.find(entry => entry.id === agent);
+    const method = (account?.connected ?? !!account?.windows?.length) ? 'disconnect' : 'connect';
+    connectionTask = { agent, method }; connectionRevision++; renderConnections();
+    try {
+      const result = await native(method, agent);
+      if (result.agents) { accounts = result.agents; limitsLoaded = true; }
+      else if (result.issue) settingsMessage(connectionMessage(result, agent)[1]);
+    } catch (error) { settingsMessage(error.message); }
+    finally { connectionTask = null; cancelling = false; render(); }
     return;
   }
-  const provider = providers.find(p => AGENTS[p.agent]?.id === agent);
-  const method = (provider?.connected ?? !!provider?.windows?.length) ? 'disconnect' : 'connect';
-  connectionTask = {agent, method}; connectionRevision++; renderConnections();
+  const name = button.dataset.source || button.dataset.default;
+  if (!name) return;
+  button.disabled = true; settingsMessage();
   try {
-    const result = await native(method, agent);
-    if (result.cancelled) return;
-    if (result.providers) { providers = result.providers; subscriptionsLoaded = true; }
-    else if (result.issue) settingsMessage(connectionMessage(result)[1]);
+    const result = await native(button.dataset.source ? 'choose_directory' : 'reset_source', name);
+    if (!result.cancelled) showSources(result);
   } catch (error) { settingsMessage(error.message); }
-  finally { connectionTask = null; cancelling = false; render(); }
+  finally { button.disabled = false; }
 });
 
-function renderSubscriptions() {
-  const visible = activeProviders().filter(p => agentFilter === 'all' || p.agent === agentFilter);
-  const missing = subscriptionsLoaded ? knownAgents().filter(agent => (agentFilter === 'all' || agent === agentFilter) && !visible.some(p => p.agent === agent))
-    .map(agent => providers.find(p => p.agent === agent) || { agent }) : [];
-  const signature = JSON.stringify([visible, missing, preferences.limitAlert, preferences.hiddenLimits, Math.floor(Date.now() / 60000)]);
+function renderLimits() {
+  const visible = activeAccounts().filter(account => agentFilter === 'all' || account.id === agentFilter);
+  const missing = limitsLoaded ? knownAgents().filter(id => (agentFilter === 'all' || id === agentFilter) && !visible.some(account => account.id === id))
+    .map(id => accounts.find(account => account.id === id) || { id }) : [];
+  const signature = JSON.stringify([visible, missing, preferences.limitAlert, preferences.hiddenLimits, document.documentElement.dataset.theme, Math.floor(Date.now() / 60000)]);
   renderLimitOptions();
-  const hasLimits = activeProviders().length > 0;
-  $('limit-setting').hidden = !hasLimits;
-  $('subscriptions-section').hidden = !visible.some(p => p.windows.some(w => !preferences.hiddenLimits.includes(w.minutes))) && !missing.length;
-  if (signature === quotaSignature) return;
-  quotaSignature = signature;
-  $('subscriptions').replaceChildren(...visible.flatMap(provider => {
-    const windows = provider.windows.filter(item => !preferences.hiddenLimits.includes(item.minutes));
-    return windows.length ? [quotaCard(provider, windows)] : [];
+  // The GNOME top bar already shows limits; the widget then keeps to activity.
+  $('limits-section').hidden = topBar ||
+    !visible.some(account => account.windows.some(w => !preferences.hiddenLimits.includes(w.minutes))) && !missing.length;
+  if (signature === limitSignature) return;
+  limitSignature = signature;
+  $('limits').replaceChildren(...visible.flatMap(account => {
+    const windows = account.windows.filter(item => !preferences.hiddenLimits.includes(item.minutes));
+    return windows.length ? [limitCard(account, windows)] : [];
   }));
-  for (const provider of missing) {
-    const { agent } = provider;
-    const [label, hint] = connectionMessage(provider);
-    const row = el('div', undefined, 'quota-unavailable');
+  for (const account of missing) {
+    const [label, hint] = connectionMessage(account, account.id);
+    const row = el('div', undefined, 'limit-unavailable');
     const action = el('button', label, 'text-button caption');
     action.addEventListener('click', () => openSettings());
-    row.append(agentIcon(agent), el('span', agent.replace(' Code', '')), action);
+    row.append(agentIcon(account.id), el('span', agentName(account.id)), action);
     row.title = hint;
-    $('subscriptions').append(row);
+    $('limits').append(row);
   }
 }
 
 function render() {
-  updateAgents(); updateProjects(); renderSubscriptions(); renderConnections(); renderActivity();
-  for (const name of ['codex', 'claude']) {
-    $('source-empty-' + name).hidden = data?.source_counts?.[name] !== 0 || providers.some(p => AGENTS[p.agent]?.id === name && p.issue === 'disconnected');
+  updateAgents(); renderLimits(); renderConnections(); renderActivity();
+  for (const id of agents.keys()) {
+    $('source-empty-' + id).hidden = data?.source_counts?.[id] !== 0 || accounts.some(account => account.id === id && account.issue === 'disconnected');
   }
-  const warnings = preferences.view === 'compact' ? [] : data?.warnings || [];
-  $('connection-status').hidden = preferences.view === 'compact' || (!failed && !warnings.length);
+  const warnings = data?.warnings || [];
+  $('connection-status').hidden = !failed && !warnings.length;
   $('connection').textContent = failed ? 'Not updating' : warnings.includes('Reading local history…') ? 'Reading history…' : 'Some usage missing';
   $('connection').dataset.state = failed ? 'error' : '';
   $('connection-info').textContent = failed ? 'Local history could not be refreshed.' : warnings.join(' ');
@@ -644,13 +630,13 @@ async function refresh(name) {
   const revision = connectionRevision;
   try {
     const next = await native(name);
-    if (!Array.isArray(next[name === 'usage' ? 'rows' : 'providers'])) throw Error('Unavailable');
+    if (!Array.isArray(next[name === 'usage' ? 'rows' : 'agents'])) throw Error('Unavailable');
     feed.seconds = next.refresh_seconds || feed.seconds;
     if (name === 'usage') { data = next; failed = false; }
-    else if (revision === connectionRevision && !connectionTask) { providers = next.providers; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { accounts = next.agents; topBar = next.top_bar === true; limitsLoaded = true; }
   } catch {
     if (name === 'usage') failed = true;
-    else if (revision === connectionRevision && !connectionTask) { providers = []; subscriptionsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) { accounts = []; limitsLoaded = true; }
   } finally {
     feed.busy = false;
     clearTimeout(feed.timer);
@@ -659,14 +645,14 @@ async function refresh(name) {
 }
 
 function changePeriod(value) {
-  preferences.period = value; $('period').value = value;
+  preferences.period = value; updatePeriod();
   savePreferences(); promptId = null; bucketId = null; hideHeatmapTooltip(); render();
 }
 
 async function openSettings() {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
-  $('indicator-setting').value = preferences.indicator;
-  $('view-setting').value = preferences.view; $('style-setting').value = preferences.style; $('pinned-setting').checked = preferences.pinned;
+  for (const key of ['theme', 'style', 'indicator']) $(key + '-setting').value = preferences[key];
+  $('pinned-setting').checked = preferences.pinned;
   $('settings').showModal(); reportSize();
   try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
 }
@@ -679,55 +665,41 @@ function updateWarningControl() {
   $('limit-alert').style.setProperty('--fill', preferences.limitAlert + '%');
 }
 
-function showSources(next) {
-  sources = next;
-  for (const name of ['codex', 'claude']) {
-    const button = $('source-' + name);
-    button.disabled = false; button.querySelector('span').textContent = sources[name].path;
-    button.title = sources[name].path + (sources[name].exists ? '' : ' (not found)');
-    document.querySelector('[data-default="' + name + '"]').hidden = !sources[name].override;
+function showSources(sources) {
+  for (const id of agents.keys()) {
+    const button = $('source-' + id), source = sources[id];
+    if (!button || !source) continue;
+    button.disabled = false; button.querySelector('span').textContent = source.path;
+    button.title = source.path + (source.exists ? '' : ' (not found)');
+    document.querySelector('[data-default="' + id + '"]').hidden = !source.override;
   }
 }
-$('agent-settings').addEventListener('click', async event => {
-  const button = event.target.closest('button');
-  if (!button) return;
-  const name = button.dataset.source || button.dataset.default;
-  if (!name) return;
-  button.disabled = true; settingsMessage();
-  try {
-    const result = await native(button.dataset.source ? 'choose_directory' : 'reset_source', name);
-    if (!result.cancelled) showSources(result);
-  } catch (error) { settingsMessage(error.message); }
-  finally { button.disabled = false; }
+
+$('period').addEventListener('click', event => {
+  const button = event.target.closest('[data-period]');
+  if (button && button.dataset.period !== preferences.period) changePeriod(button.dataset.period);
 });
-$('period').addEventListener('change', () => changePeriod($('period').value));
-async function chooseProject(reset = false) {
-  $('project').disabled = true; settingsMessage();
-  try {
-    const result = reset ? {path: ''} : await native('choose_directory', 'project');
-    if (result.cancelled) return;
-    preferences.project = result.path || ''; promptId = null; bucketId = null;
-    savePreferences(); hideHeatmapTooltip(); render();
-  } catch (error) { settingsMessage(error.message); }
-  finally { $('project').disabled = false; }
-}
-$('project').addEventListener('click', () => chooseProject());
-$('project-reset').addEventListener('click', () => chooseProject(true));
-for (const key of ['view', 'style', 'indicator']) $(key + '-setting').addEventListener('change', () => {
+$('detail-toggle').addEventListener('click', () => {
+  preferences.details = !preferences.details; savePreferences(); renderActivity();
+});
+for (const key of ['style', 'indicator', 'theme']) $(key + '-setting').addEventListener('change', () => {
   preferences[key] = $(key + '-setting').value;
-  applyTheme(); render(); savePreferences(); reportSize();
+  applyTheme(); hideHeatmapTooltip(); render(); savePreferences(); reportSize();
 });
 $('limit-options').addEventListener('change', event => {
   const input = event.target;
   if (input.type !== 'checkbox') return;
   preferences.hiddenLimits = preferences.hiddenLimits.filter(value => value !== Number(input.value));
   if (!input.checked) preferences.hiddenLimits.push(Number(input.value));
-  savePreferences(); renderSubscriptions(); reportSize();
+  savePreferences(); renderLimits(); reportSize();
 });
 $('pinned-setting').addEventListener('change', () => { preferences.pinned = $('pinned-setting').checked; savePreferences(); });
-document.querySelector('.widget').addEventListener('pointerdown', event => {
+$('help-toggle').addEventListener('click', () => {
+  $('help').hidden = !$('help').hidden;
+  $('help-toggle').setAttribute('aria-expanded', String(!$('help').hidden));
+});
+$('window-handle').addEventListener('pointerdown', event => {
   if (event.button !== 0 || event.target.closest('button, details, select, input, a')) return;
-  if (preferences.view !== 'compact' && !event.target.closest('.header')) return;
   event.preventDefault(); native('move').catch(error => settingsMessage(error.message));
 });
 $('widget-close').addEventListener('click', () => native('quit'));
@@ -742,14 +714,12 @@ const heatmapObserver = new ResizeObserver(entries => {
 });
 let layoutRequest = '';
 function reportSize() {
-  if (document.documentElement.dataset.layoutView !== preferences.view) return;
   const panel = $('settings').open ? $('settings') : document.querySelector('.widget');
   const height = Math.ceil(parseFloat(getComputedStyle(panel).height)) + 24;
-  const args = { height, compact: preferences.view === 'compact' };
-  const request = JSON.stringify(args);
+  const request = JSON.stringify({ height });
   if (request === layoutRequest) return;
   layoutRequest = request;
-  native('layout', args).catch(error => { layoutRequest = ''; settingsMessage(error.message); });
+  native('layout', { height }).catch(error => { layoutRequest = ''; settingsMessage(error.message); });
 }
 const sizeObserver = new ResizeObserver(reportSize);
 document.querySelectorAll('.panel-content').forEach(content => sizeObserver.observe(content));
@@ -775,15 +745,11 @@ $('heatmaps').addEventListener('keydown', event => {
   if (next && !next.disabled) { next.focus(); showHeatmapTooltip(next); }
 });
 $('settings-open').addEventListener('click', () => openSettings());
-$('theme-toggle').addEventListener('click', () => {
-  preferences.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  savePreferences(); applyTheme(); hideHeatmapTooltip(); render();
-});
 $('limit-alert').addEventListener('input', () => {
-  preferences.limitAlert = Number($('limit-alert').value); updateWarningControl(); renderSubscriptions();
+  preferences.limitAlert = Number($('limit-alert').value); updateWarningControl(); renderLimits();
 });
 $('limit-alert').addEventListener('change', savePreferences);
-for (const method of ['export', 'import']) $(''+method+'-history').addEventListener('click', async () => {
+for (const method of ['export', 'import']) $(method + '-history').addEventListener('click', async () => {
   const button = $(method + '-history'); button.disabled = true; settingsMessage();
   try {
     const result = await native(method);
@@ -802,16 +768,18 @@ document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refresh(name);
   }
 });
-native('preferences').then(saved => {
+Promise.all([native('agents'), native('preferences')]).then(([registry, saved]) => {
+  for (const agent of registry) agents.set(agent.id, agent);
+  buildAgentSettings();
   document.documentElement.dataset.demo = String(saved.demo === true);
   if (['system', 'dark', 'light'].includes(saved.theme)) preferences.theme = saved.theme;
   if (['today', 'weekly', 'all'].includes(saved.period)) preferences.period = saved.period;
   if (Number.isInteger(saved.limitAlert) && saved.limitAlert >= 0 && saved.limitAlert <= 100) preferences.limitAlert = saved.limitAlert;
-  if (['normal', 'compact'].includes(saved.view)) preferences.view = saved.view;
   if (['glass', 'minimal', 'brutalist', 'neumorphic', 'swiss'].includes(saved.style)) preferences.style = saved.style;
   if (['bar', 'ring'].includes(saved.indicator)) preferences.indicator = saved.indicator;
   if (Array.isArray(saved.hiddenLimits)) preferences.hiddenLimits = [...new Set(saved.hiddenLimits.filter(value => Number.isInteger(value) && value > 0))];
   preferences.pinned = saved.pinned === true;
-  if (typeof saved.project === 'string' && saved.project !== '?' && saved.project.length <= 4096) preferences.project = saved.project;
-  $('period').value = preferences.period; applyTheme(); savePreferences();
-}).catch(error => settingsMessage(error.message)).finally(() => { refresh('usage'); refresh('subscriptions'); });
+  preferences.details = saved.details === true;
+  // Saving drops preferences that no longer exist.
+  updatePeriod(); applyTheme(); savePreferences();
+}).catch(error => settingsMessage(error.message)).finally(() => { refresh('usage'); refresh('limits'); });

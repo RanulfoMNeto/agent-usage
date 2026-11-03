@@ -1,25 +1,24 @@
 [collection]
+# Local history scans; the widget refreshes on the same cadence.
 refresh_seconds = 1
 
 [widget]
-width = 400
-compact_width = 300
+width = 344
 
 [integrations]
 windows_shortcut = true
 
-[transcripts]
-codex = "~/.codex"
-claude = "~/.claude/projects"
-show_question = true
-
-[subscriptions]
-codex_command = ["codex"]
-claude_command = ["claude"]
-# Native account queries; the interface follows the collection interval.
+[limits]
+# Native account queries; the widget and top bar read the cached result.
 refresh_seconds = 60
 timeout_seconds = 10
 stale_seconds = 300
+
+# Optional per-agent overrides, keyed by agent ID (README › Supported agents):
+# [agents.<id>]
+# command = ["/absolute/path/to/agent"]
+# history = "/absolute/path/to/history"
+[agents]
 
 # USD per million tokens. Standard API comparison, not subscription billing.
 # Excludes Fast/Ultrafast pricing and external tools.

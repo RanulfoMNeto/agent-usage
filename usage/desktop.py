@@ -3,10 +3,13 @@
 import json
 import logging
 import math
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import (
+    SLOT,
     QByteArray,
     QCoreApplication,
     QEvent,
@@ -16,6 +19,7 @@ from PySide6.QtCore import (
     QSaveFile,
     QSettings,
     Qt,
+    QTimer,
     QUrl,
     Signal,
     Slot,
@@ -31,18 +35,25 @@ from PySide6.QtWebEngineCore import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from .agents import AGENTS
+from .agents.base import validate_login_url
 from .config import user_directory
 from .history import MAX_IMPORT, Usage
 from .integration import (
     ConnectionUnavailable,
-    claude_terminal_command,
     gnome_call,
-    open_claude_terminal,
+    gnome_commands,
+    gnome_session,
+    open_terminal,
+    terminal_command,
 )
-from .readers import project_path
-from .subscriptions import Subscriptions, validate_login_url
+from .limits import Limits
 
 STATIC = Path(__file__).with_name("static").resolve()
+# Account queries keep their own cache; this only bounds how soon the top bar follows.
+TOP_BAR_SECONDS = 5
+# Unchanged limits are republished so the extension can tell an exit from silence.
+TOP_BAR_HEARTBEAT = 60
 
 
 class LocalOnly(QWebEngineUrlRequestInterceptor):
@@ -61,32 +72,35 @@ class LocalPage(QWebEnginePage):
 
 class Bridge(QObject):
     reply = Signal(str, str)
-    layout_changed = Signal(int, float, bool)
-    login_url = Signal(str)
+    layout_changed = Signal(int, float)
+    login_url = Signal(str, str)
 
-    def __init__(self, usage, subscriptions, settings, window):
+    def __init__(self, usage, limits, settings, window, agents=AGENTS):
         super().__init__(window)
-        self.usage, self.subscriptions, self.settings, self.window = (
-            usage,
-            subscriptions,
-            settings,
-            window,
-        )
+        self.usage, self.limits, self.settings, self.window = usage, limits, settings, window
+        self.agents = agents
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-usage")
         self.terminal = None
         self.login_url.connect(self.open_login)
 
-    @Slot(str)
-    def open_login(self, url):
+    @property
+    def demo(self):
+        return getattr(self.window, "config", {}).get("demo", False)
+
+    def agent(self, value):
+        if value not in self.agents:
+            raise ValueError("Unknown agent")
+        return self.agents[value]
+
+    @Slot(str, str)
+    def open_login(self, agent, url):
         try:
-            url = validate_login_url(url)
-            if not getattr(self.window, "config", {}).get("demo") and QDesktopServices.openUrl(
-                QUrl(url)
-            ):
+            url = validate_login_url(url, self.agent(agent).login_hosts)
+            if not self.demo and QDesktopServices.openUrl(QUrl(url)):
                 return
         except ValueError:
             pass
-        self.subscriptions.cancel_login()
+        self.limits.cancel_login()
 
     def respond(self, identifier, value):
         self.reply.emit(identifier, json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -106,21 +120,40 @@ class Bridge(QObject):
             if len(payload) > 16384:
                 raise ValueError("Oversized request")
             args = json.loads(payload)
+            if method == "agents":
+                self.respond(
+                    identifier,
+                    [
+                        dict(
+                            id=agent.id,
+                            name=agent.name,
+                            colors=list(agent.colors),
+                            monochrome=agent.monochrome,
+                            icon=f"assets/agents/{agent.id}.svg",
+                        )
+                        for agent in self.agents.values()
+                    ],
+                )
+                return
             if method in ("connect", "disconnect", "cancel_login"):
-                if getattr(self.window, "config", {}).get("demo"):
+                if self.demo:
                     raise ValueError("Connections are disabled in the demo")
-                if args not in ("codex", "claude"):
-                    raise ValueError("Unknown connection")
+                agent = self.agent(args)
                 if method == "cancel_login":
-                    self.subscriptions.cancel_login()
+                    self.limits.cancel_login()
                     self.respond(identifier, {})
                     return
-                if method == "connect" and args == "claude":
-                    terminal = claude_terminal_command(self.subscriptions.config["claude_command"])
-                    self.terminal = open_claude_terminal(terminal)
+                if method == "connect" and agent.login == "terminal":
+                    try:
+                        command = self.limits.command(agent)
+                    except FileNotFoundError:
+                        raise ConnectionUnavailable(
+                            f"Install {agent.name} in this environment."
+                        ) from None
+                    self.terminal = open_terminal(terminal_command(command))
             if method == "preferences":
                 values = json.loads(self.settings.value("appearance", "{}"))
-                if getattr(self.window, "config", {}).get("demo"):
+                if self.demo:
                     values["demo"] = True
                 self.respond(identifier, values)
                 return
@@ -142,38 +175,20 @@ class Bridge(QObject):
                 self.respond(identifier, {})
                 return
             if method == "layout":
-                if (
-                    not isinstance(args, dict)
-                    or type(args.get("height")) is not int
-                    or not 0 < args["height"] <= 10000
-                    or type(args.get("compact")) is not bool
-                ):
+                height = args.get("height") if isinstance(args, dict) else None
+                if type(height) is not int or not 0 < height <= 10000:
                     raise ValueError("Invalid content layout")
-                self.window.content_height = args["height"]
-                self.window.compact = args["compact"]
+                self.window.content_height = height
                 self.window.apply_size()
                 self.respond(identifier, {})
                 return
             if method in ("choose_directory", "export", "import"):
                 if method == "choose_directory":
-                    if args not in ("codex", "claude", "project"):
-                        raise ValueError("Unknown directory type")
-                    project = args == "project"
-                    current = (
-                        json.loads(self.settings.value("appearance", "{}")).get("project")
-                        if project
-                        else self.usage.sources()[args]["path"]
-                    )
                     path = QFileDialog.getExistingDirectory(
                         self.window,
-                        "Project directory" if project else "Session directory",
-                        current
-                        if isinstance(current, str) and Path(current).is_dir()
-                        else str(Path.home()),
+                        f"{self.agent(args).name} history directory",
+                        self.usage.sources()[args]["path"],
                     )
-                    if path and project:
-                        self.respond(identifier, {"path": project_path(path)})
-                        return
                 elif method == "export":
                     path, _ = QFileDialog.getSaveFileName(
                         self.window,
@@ -200,36 +215,32 @@ class Bridge(QObject):
             self.respond(identifier, {"error": "Could not update settings."})
 
     def execute(self, method, args):
+        refresh = self.usage.config["collection"]["refresh_seconds"]
         if method in ("connect", "disconnect"):
-            if method == "connect" and args == "codex":
-                result = self.subscriptions.connect_codex(self.login_url.emit)
+            agent = self.agent(args)
+            if method == "connect" and agent.login == "browser":
+                result = self.limits.connect(agent, lambda url: self.login_url.emit(agent.id, url))
                 if result.get("issue"):
                     return {"issue": result["issue"]}
-            if method == "connect" and args == "claude":
-                with self.subscriptions.lock:
-                    self.subscriptions.checked.pop("claude", None)
-            self.usage.set_connection(args, method == "connect")
-            return self.subscriptions.snapshot(self.usage.connections)
+            elif method == "connect":
+                self.limits.invalidate(agent)
+            self.usage.set_connection(agent.id, method == "connect")
+            return self.limits.snapshot(self.usage.connections)
         if method == "usage":
-            return self.usage.snapshot()
-        if method == "subscriptions":
+            return dict(self.usage.snapshot(), refresh_seconds=refresh)
+        if method == "limits":
             # Rendering follows collection cadence; account queries keep their own cache.
             return dict(
-                self.subscriptions.snapshot(self.usage.connections),
-                refresh_seconds=self.usage.config["collection"]["refresh_seconds"],
+                self.limits.snapshot(self.usage.connections),
+                refresh_seconds=refresh,
+                top_bar=getattr(getattr(self.window, "top_bar", None), "attached", False),
             )
         if method == "sources":
             return self.usage.sources()
         if method in ("choose_directory", "reset_source"):
-            name = args["agent"] if method == "choose_directory" else args
-            if name not in ("codex", "claude"):
-                raise ValueError("Unknown source")
-            values = {
-                key: value["override"]
-                for key, value in self.usage.sources().items()
-                if key in ("codex", "claude")
-            }
-            values[name] = args["path"] if method == "choose_directory" else ""
+            agent = self.agent(args["agent"] if method == "choose_directory" else args)
+            values = {key: value["override"] for key, value in self.usage.sources().items()}
+            values[agent.id] = args["path"] if method == "choose_directory" else ""
             return self.usage.set_sources(values)
         if method == "export":
             body = json.dumps(self.usage.export(), ensure_ascii=False, allow_nan=False).encode()
@@ -250,19 +261,138 @@ class Bridge(QObject):
         raise ValueError("Unknown operation")
 
     def close(self):
-        if isinstance(self.subscriptions, Subscriptions):
-            self.subscriptions.cancel_login(close=True)
+        if hasattr(self.limits, "cancel_login"):
+            self.limits.cancel_login(close=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
 
 
+def top_bar_limits(snapshot, agents, warning, visible):
+    """Limits for the top bar, without history, paths or account details."""
+    return dict(
+        agents=[
+            dict(
+                id=entry["id"],
+                name=agents[entry["id"]].name,
+                # The shell's menus are dark, so the dark-theme accent applies.
+                color=agents[entry["id"]].colors[1],
+                status=entry["status"],
+                issue=entry.get("issue"),
+                limits=[
+                    {
+                        key: item[key]
+                        for key in ("id", "bucket", "minutes", "used_percent", "resets_at")
+                    }
+                    for item in entry["windows"]
+                ],
+            )
+            for entry in snapshot["agents"]
+        ],
+        warning=warning if type(warning) is int and 0 <= warning <= 100 else 0,
+        visible=visible,
+    )
+
+
+class TopBar(QObject):
+    """Mirror limits into the GNOME top bar, whose menu can then hide the widget."""
+
+    collected = Signal(object)
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        self.widget = widget
+        self.snapshot = {"agents": []}
+        self.body = None
+        self.sent = 0.0
+        # Available follows each call; attached survives a locked screen until detached.
+        self.available = self.attached = False
+        self.task = None
+        self.collected.connect(self.receive)
+        self.timer = QTimer(self)
+        self.timer.setInterval(TOP_BAR_SECONDS * 1000)
+        self.timer.timeout.connect(self.refresh)
+
+    def start(self):
+        """Return whether the widget should stay hidden behind an answering top bar."""
+        if self.widget.config.get("demo") or not gnome_session():
+            return False
+        gnome_commands(self, SLOT("command(int,QString)"))
+        self.timer.start()
+        self.refresh()
+        self.publish()
+        return self.available and self.widget.preferences.value("hidden", False, type=bool)
+
+    def stop(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            gnome_call("SetLimits", "")
+
+    @Slot()
+    def refresh(self):
+        if self.task is None or self.task.done():
+            self.task = self.widget.bridge.pool.submit(self.collect)
+
+    def collect(self):
+        bridge = self.widget.bridge
+        try:
+            self.collected.emit(bridge.limits.snapshot(bridge.usage.connections))
+        except Exception as exc:
+            logging.warning("Top bar limits unavailable (%s)", type(exc).__name__)
+
+    @Slot(object)
+    def receive(self, snapshot):
+        self.snapshot = snapshot
+        self.publish()
+
+    def publish(self):
+        if not self.timer.isActive():
+            return
+        try:
+            preferences = json.loads(self.widget.preferences.value("appearance", "{}"))
+            warning = preferences.get("limitAlert") if isinstance(preferences, dict) else None
+            body = json.dumps(
+                top_bar_limits(
+                    self.snapshot, self.widget.bridge.agents, warning, self.widget.isVisible()
+                ),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+            )
+        except (ValueError, TypeError, KeyError):
+            logging.warning("Top bar limits could not be prepared.")
+            return
+        # Retry after a failure: the shell disables extensions while the screen is locked.
+        if (
+            self.available
+            and body == self.body
+            and time.monotonic() - self.sent < TOP_BAR_HEARTBEAT
+        ):
+            return
+        self.available = gnome_call("SetLimits", body)
+        self.attached = self.attached or self.available
+        self.body, self.sent = body, time.monotonic()
+
+    @Slot(int, str)
+    def command(self, pid, action):
+        if pid != os.getpid():
+            return
+        if action == "toggle":
+            visible = not self.widget.isVisible()
+            self.widget.preferences.setValue("hidden", not visible)
+            self.widget.setVisible(visible)
+        elif action == "detach":
+            # The extension is going away; never leave the widget unreachable.
+            self.available = self.attached = False
+            self.widget.show()
+        elif action == "quit":
+            QApplication.instance().quit()
+
+
 class Widget(QWebEngineView):
-    def __init__(self, config, usage, subscriptions):
+    def __init__(self, config, usage, limits):
         super().__init__()
         self.config = config
         self.content_height = 120
-        self.layout_width = config["width"]
         self.layout_scale = 1
-        self.compact = False
         self.setWindowTitle("Agent Usage")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -287,7 +417,8 @@ class Widget(QWebEngineView):
         )
         if config.get("demo"):
             self.preferences.setValue("appearance", json.dumps({"period": "all"}))
-        self.bridge = Bridge(usage, subscriptions, self.preferences, self)
+        self.bridge = Bridge(usage, limits, self.preferences, self)
+        self.top_bar = TopBar(self)
         self.channel = QWebChannel(self.page())
         self.channel.registerObject("backend", self.bridge)
         self.page().setWebChannel(self.channel)
@@ -300,8 +431,7 @@ class Widget(QWebEngineView):
         self.load(QUrl.fromLocalFile(str(STATIC / "index.html")))
 
     def apply_preferences(self, values):
-        self.compact = values.get("view") == "compact"
-        self.apply_size()
+        self.top_bar.publish()
         pinned = values.get("pinned") is True
         if gnome_call("SetPinned", pinned):
             return
@@ -313,10 +443,15 @@ class Widget(QWebEngineView):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.top_bar.publish()
         self.windowHandle().screenChanged.connect(
             self.watch_screen, Qt.ConnectionType.UniqueConnection
         )
         self.watch_screen(self.screen())
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.top_bar.publish()
 
     @Slot(QScreen)
     def watch_screen(self, screen):
@@ -332,18 +467,14 @@ class Widget(QWebEngineView):
             self.fit_content()
 
     def fit_content(self):
-        scale = min(
-            self.layout_scale, self.width() / self.layout_width, self.height() / self.content_height
-        )
-        self.bridge.layout_changed.emit(self.layout_width, scale, self.compact)
+        width = self.config["width"]
+        scale = min(self.layout_scale, self.width() / width, self.height() / self.content_height)
+        self.bridge.layout_changed.emit(width, scale)
 
     @Slot()
     def apply_size(self):
         screen = self.screen().availableGeometry()
         width = self.config["width"]
-        if self.compact:
-            width = min(width, self.config["compact_width"])
-        self.layout_width = width
         height = max(120, self.content_height)
         scale = min(1, screen.width() / width, screen.height() / height)
         self.layout_scale = scale
@@ -359,7 +490,7 @@ class Widget(QWebEngineView):
             )
 
 
-def run(config, *, subscriptions=None):
+def run(config, *, limits=None):
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("Agent Usage")
     app.setDesktopFileName("agent-usage")
@@ -370,17 +501,17 @@ def run(config, *, subscriptions=None):
     lock = QLockFile(str(state / "widget.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(0):
-        QMessageBox.information(None, "Agent Usage", "The widget is already running.")
+        QMessageBox.information(None, "Agent Usage", "Agent Usage is already running.")
         return
     usage = Usage(config)
-    widget = Widget(
-        config["widget"], usage, subscriptions or Subscriptions(config["subscriptions"])
-    )
+    widget = Widget(config["widget"], usage, limits or Limits(config))
     usage.start()
-    widget.show()
+    if not widget.top_bar.start():
+        widget.show()
     try:
         app.exec()
     finally:
+        widget.top_bar.stop()
         widget.preferences.setValue("geometry", widget.saveGeometry())
         widget.preferences.sync()
         usage.close()

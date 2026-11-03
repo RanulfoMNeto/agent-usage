@@ -1,8 +1,28 @@
 ![Agent Usage — your agent usage, limits and resets, right on your desktop](.github/assets/header.svg)
 
-A local desktop widget for **Codex and Claude Code** on Linux and Windows.
-Read native session history, check subscription availability, and inspect activity
-by day or project. No API key or external collector. Account sign-in opens your browser.
+A local desktop widget for **coding agents** on Linux and Windows. It reads each
+agent's native session history, shows account limits and when they reset, and
+lets you inspect activity by day. On GNOME, limits live in the top bar. No API
+key or external collector is needed.
+
+## Supported agents
+
+| Agent | ID | History | Limits | Sign-in |
+| --- | --- | --- | --- | --- |
+| Claude Code | `claude` | `~/.claude/projects` (`CLAUDE_CONFIG_DIR`) | Usage control request ¹ | Terminal |
+| Codex | `codex` | `~/.codex/sessions`, `archived_sessions` (`CODEX_HOME`) | App server account interface | Browser |
+
+Each agent is found on `PATH`, in its native installation directory, or inside its
+official VS Code, VS Code Insiders or Cursor extension. Agents handle their own
+credentials; Agent Usage never reads or stores tokens, and no sign-in starts on
+its own. API-key accounts do not report subscription limits. Windows and WSL are
+separate environments.
+
+¹ Claude Code's `get_usage` control request is the **experimental** interface used
+by its VS Code extension, verified with version 2.1.301; it may change. Queries send
+control requests only, with tools, hooks and session persistence disabled.
+
+New agents are added as modules; see [Adding an agent](#adding-an-agent).
 
 ## Get started
 
@@ -10,10 +30,7 @@ by day or project. No API key or external collector. Account sign-in opens your 
 [Releases](https://github.com/RanulfoMNeto/agent-usage/releases), extract the **whole
 folder**, and open `agent-usage` on Linux or `agent-usage.exe` on Windows. Python
 and Qt are included. Keep the `_internal` directory beside the executable.
-
-On Windows, the first normal launch adds **Agent Usage** to the Start menu and
-Windows Search. This works with the portable app and the source command below.
-Subsequent launches from the shortcut need no terminal or administrator access.
+On Windows, the first launch adds **Agent Usage** to the Start menu.
 
 **From source:** install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and Git, then run:
@@ -25,216 +42,175 @@ uv run --locked --no-dev agent-usage
 ```
 
 Python 3.12–3.14 is supported; uv can supply it. A desktop session is required.
-`uv run` runs the source; it does not build a portable `.exe`. Keep the checkout
-and its `.venv` for the source shortcut, or the extracted folder for the portable
-app. After moving an installation, launch it once again to refresh the shortcut.
-An existing agent installation is needed for real data. To try the widget first:
+After moving an installation, launch it once to refresh its shortcut.
+
+To try it without any agent installed:
 
 ```sh
 uv run --locked --no-dev agent-usage --demo
 ```
 
-Demo mode creates six months of fictional native sessions in a temporary profile.
-It makes no account queries and removes its profile on normal exit. It does not
-require Codex or Claude Code. Close it to return to your real profile.
+The demo creates six months of fictional sessions for every supported agent in a
+temporary profile, makes no account queries, and removes the profile on exit.
 
-Drag the header to move the widget. Its height automatically fits the visible
-content. **Compact** shows limits; **Normal** adds activity. Click a day in
-**Weekly** or **History** to inspect its chart and totals.
-Hover previews; clicking selects. Settings controls appearance, warnings, projects
-and sources. The close button quits the app.
-
-**Settings → Limits** chooses which reported limits to show across agents;
-**Indicator** switches between bars (default) and rings. Limits share one card
-per agent. These preferences persist locally and do not affect collection.
-In **Both → Weekly**, each agent has its own current reset cycle. Clicking a day
-selects that agent's activity; **History** combines both, with a breakdown on hover.
-Heatmap intensity represents recorded tokens, not subscription percentages.
-
-## See it in action
+## Use the widget
 
 <p align="center">
-  <img src=".github/assets/preview.png" width="400" alt="The complete Agent Usage widget in History view, with both agents and a selected day's line chart">
+  <img src=".github/assets/preview.png" width="344" alt="The Agent Usage widget with account limits, the History heatmap and an open day">
 </p>
 
-![History shows daily intensity, Weekly follows the current reset window, and Day shows prompt-level tokens and totals. Captured from the widget using fictional data.](.github/assets/activity.png)
+- **Header:** drag it to move the widget. Agent icons filter the activity; the
+  gear opens Settings; × quits.
+- **Limits:** one card per agent, with each reported window and its reset. When
+  the GNOME top bar shows limits, the widget leaves them out.
+- **Today**, **Weekly** and **History** choose the period. Click a day to see its
+  totals; click the summary below to open its chart and prompts.
+- **Settings:** visible limits, bars or rings, a usage warning, theme, style,
+  keep on top, agent connections and history folders, and export or import.
+  The **?** button explains how the numbers are measured.
 
-*Real widget captures with fictional demo data. The demo starts in History;
-Compact view shows subscription limits only.*
+The widget's height follows its content. Preferences persist locally and never
+affect collection.
 
-## Connect your agents
+![History, the current weekly reset window, and an open day. Captured from the widget with fictional demo data.](.github/assets/activity.png)
 
-Open **Settings → Agents**. History is discovered locally; subscription limits
-are queried through the installed agents every 60 seconds by default. No model
-request or open terminal is needed to keep limits current.
+## GNOME top bar
 
-| Agent | Connect | Limits |
-| --- | --- | --- |
-| Codex | Reuses your ChatGPT login or opens the official sign-in page | Native account interface |
-| Claude Code | Opens the native terminal for sign-in if needed; you can close it afterward | Native usage control request |
+```sh
+uv run --locked --no-dev agent-usage --install-gnome
+```
 
-Both agents are detected on `PATH`, in their standard installation, or inside
-their official VS Code, VS Code Insiders or Cursor extension. Each agent handles
-its own credentials; the widget does not read or store tokens. No login starts
-on its own. API-key accounts do not provide subscription quotas. Windows and WSL
-are separate environments. Custom executables can be set with
-`subscriptions.codex_command` and `subscriptions.claude_command`.
+Sign out and back in. Agent Usage then starts at login, its widget stays behind
+normal windows on every workspace, and its icon appears in the top bar. Portable
+builds accept the same flag. GNOME user extensions must be enabled.
 
-Claude's `get_usage` control request is the **experimental** interface used by its
-VS Code extension, verified with Claude Code **2.1.301**. It may change between
-versions. Unsupported versions or failed queries show an unavailable state;
-old snapshots are never presented as a successful refresh. The widget sends
-control requests only, with tools, hooks and session persistence disabled.
-[Codex account interface](https://learn.chatgpt.com/docs/app-server) ·
-[Claude native CLI](https://code.claude.com/docs/en/cli-reference).
+The top bar menu lists every limit. Check the limits to show in the bar; the menu
+stays open while you choose. **Show reset time** adds each limit's countdown.
+Values turn yellow at the usage warning and red at 100%. The menu also hides or
+shows the widget and quits. A hidden widget stays hidden at the next login and
+returns if the extension is disabled. The demo does not publish to the top bar.
 
-**Disconnect** pauses new history collection and account queries. The choice
-persists across restarts; login, open sessions and collected history are kept.
-Reconnecting also collects activity recorded while monitoring was paused.
-
-Earlier Agent Usage status-line capture is removed automatically on startup.
-A backed-up custom status line is restored when available; other Claude settings
-and backups are preserved. The old `claude.json` snapshot is no longer used.
+After updating, run the command again and sign out and back in. Remove it with
+`agent-usage --uninstall-gnome` from the same installation; history is kept.
 
 ## Understand the data
 
-- **Limits** are reported by the agent's account interface. They apply to the
-  entire account, including when a project filter is active. Local tokens cannot
-  reconstruct subscription percentages.
-- **Weekly** follows the current reported weekly reset window. **Today** and
-  **History** group prompts by their local start date. Different accounts may
-  have different reset windows.
-- **Tokens** include recorded input and output, including cached input. A prompt
-  can involve several model calls. Missing measurements stay unknown.
-- **Duration** is exact only when the session records a confirmed duration;
-  otherwise it is identified as unconfirmed.
-- **API cost** is an estimate, **not a subscription charge**. Native recorded costs
-  are used when present; otherwise estimates require an exact model entry in
-  [defaults.toml](usage/defaults.toml) or your configuration. The bundled price
-  table currently covers only `gpt-6-astra`. Other models show no estimate unless
-  pricing or native cost is available. Fast modes and external tool charges are
-  excluded. Prices are versioned configuration, not a live pricing feed.
+- **Limits** come from each agent's account and cover all of its usage. Local
+  tokens cannot reconstruct subscription percentages.
+- **Weekly** follows each agent's current reset window. **Today** and **History**
+  group prompts by their local start date.
+- **Tokens** are recorded input and output, including cached input. A prompt can
+  involve several model calls. Missing measurements stay unknown.
+- **Duration** is shown only when the session records a confirmed duration.
+- **Estimated cost** uses standard API prices, **not subscription billing**.
+  Native recorded costs are used when present; otherwise a model needs an entry
+  under `[prices]` in [defaults.toml](usage/defaults.toml) or your configuration.
 
-The widget reads existing files; it cannot recover sessions that were deleted
-before collection. Native log formats can change between agent versions.
+Agent Usage reads existing files; it cannot recover sessions deleted before
+collection. Native log formats can change between agent versions.
 
-## Local data and privacy
+## Connections, data and privacy
 
-| Agent | Default source |
-| --- | --- |
-| Codex | `~/.codex/sessions/` and `~/.codex/archived_sessions/` |
-| Claude Code | `~/.claude/projects/` |
+**Settings → Agents** connects each agent or pauses its monitoring. Limits are
+queried through the installed agent every 60 seconds by default, without model
+requests. **Disconnect** pauses collection and queries; sign-ins and history are
+kept, and reconnecting collects what was recorded meanwhile. **History folder**
+overrides an agent's session directory.
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. **Settings → Agents → History folder** changes
-the directory for each agent. **Project filter** selects a repository using the working
-directory recorded in sessions, including its subdirectories. Records without
-project metadata appear only in the unfiltered view.
-
-The archive contains usage metadata, short prompt titles, project paths and
-source-file bookkeeping in SQLite. It does not retain full conversation bodies.
-There is no application analytics service or listening HTTP port. Native account
-queries may contact the provider through its installed client; this is not an
-offline account-limit service.
+The archive keeps usage metadata, short prompt titles and file bookkeeping in
+SQLite, never conversation text. There is no analytics service or listening port.
+Limit queries contact each provider through its own installed client.
 
 | System | History and preferences |
 | --- | --- |
 | Linux | `$XDG_STATE_HOME/agent-usage`, normally `~/.local/state/agent-usage` |
 | Windows | `%LOCALAPPDATA%\AgentUsage` |
 
-**Settings → Export / Import** transfers the collected archive as JSON. Import
-merges records without duplicates, up to 64 MiB. Changing sources keeps collected
-history. Exports can contain private titles and paths; review them before sharing.
-To erase collected data, quit the widget and remove its state directory. Original
-agent files remain unchanged and will be collected again if the widget is restarted.
+**Export / Import** transfers the archive as JSON; imports merge without
+duplicates, up to 64 MiB, and accept exports from earlier versions. Exports
+contain prompt titles; review them before sharing. To erase collected data, quit
+Agent Usage and delete its state directory. Agent files are never modified.
+
+## Configuration
+
+Defaults are in [usage/defaults.toml](usage/defaults.toml). Overrides live at
+`~/.config/agent-usage/config.toml` on Linux (`XDG_CONFIG_HOME` is respected) or
+`%LOCALAPPDATA%\AgentUsage\config.toml` on Windows; `--config PATH` selects another
+file. Agent settings use the IDs from [Supported agents](#supported-agents):
+
+```toml
+[agents.codex]
+command = ["/absolute/path/to/codex"]   # instead of discovery
+history = "/absolute/path/to/history"   # instead of the default directory
+
+[limits]
+refresh_seconds = 60
+
+[integrations]
+windows_shortcut = false                # stop updating the Start menu shortcut
+```
+
+Sections from earlier versions (`[subscriptions]`, `[transcripts]`) are ignored
+with a warning. To update, replace the portable app or pull the source; state stays
+outside the installation. To uninstall, remove the GNOME integration if enabled,
+then delete the application folder and its shortcut.
 
 ## Compatibility
 
 | Environment | Behavior |
 | --- | --- |
-| Linux desktop | Persistent Qt window; positioning and pinning depend on the compositor |
-| GNOME 50 | Optional integration places the same widget on the desktop across workspaces |
-| Windows x64 | Persistent window with **Keep on top**; no Rainmeter required |
-| macOS, other GNOME versions | Not currently supported by the desktop integration |
+| Linux desktop | Persistent window; positioning and pinning depend on the compositor |
+| GNOME 50 | Optional top bar and desktop placement across workspaces |
+| Windows x64 | Persistent window with **Keep on top** |
+| macOS, other GNOME versions | Not currently supported |
 
-CI runs the tests on Linux and Windows, at both ends of the supported Python
-range. Release builds extract the distribution archive and exercise its executable
-and renderer in an isolated demo. This does not cover every display driver,
-desktop or agent version.
-Glass is translucent; it does not supply operating-system wallpaper blur.
+CI runs the tests on Linux and Windows at both ends of the supported Python range.
+Release builds extract the archive and exercise its executable in an isolated demo.
 
-<details>
-<summary>GNOME desktop integration</summary>
+## Adding an agent
 
-```sh
-uv run --locked --no-dev agent-usage --install-gnome
-```
+Every agent is a module in [usage/agents](usage/agents) that subclasses `Agent`
+from [base.py](usage/agents/base.py); nothing else in the app names a specific agent.
 
-Sign out and back in. The widget starts at login, stays behind normal windows
-on every workspace, and is absent from Alt-Tab. **Keep on top** brings it forward.
-GNOME user extensions must be enabled. Portable builds accept the same flag.
-
-Remove with `agent-usage --uninstall-gnome` using the same installation.
-History is retained. Remove this integration before deleting or moving the app.
-
-</details>
-
-## Configuration
-
-Defaults are in [usage/defaults.toml](usage/defaults.toml). Overrides live at
-`~/.config/agent-usage/config.toml` on Linux (`XDG_CONFIG_HOME` is respected), or
-`%LOCALAPPDATA%\AgentUsage\config.toml` on Windows. `--config PATH` selects another
-file. No personal configuration belongs in the repository.
-
-```toml
-[subscriptions]
-codex_command = ["/absolute/path/to/codex"]
-```
-
-To disable Start menu shortcut registration:
-
-```toml
-[integrations]
-windows_shortcut = false
-```
-
-This stops future shortcut updates; an existing shortcut is retained.
-
-To update, replace the portable app or pull the source and rerun the locked
-command. State stays outside the installation. To uninstall, remove the GNOME
-integration if enabled, and delete the application folder and Windows Start menu
-shortcut. Delete the
-state directory separately only if you want to erase the archive.
+1. Set the attributes: `id`, `name`, `namespace` (hashed into record identities;
+   never change it), `colors` for light and dark themes, `monochrome` for a
+   single dark icon, `executable`, an editor `extension` prefix if one bundles it,
+   and `login` (`"terminal"` or `"browser"` with `login_hosts`).
+2. Implement `default_history`, `parse` (one native event into prompt and call
+   records from [records.py](usage/records.py)), `read_limits` (normalized windows
+   from the native client), `demo_session`, and, when needed, `history_files`,
+   `install_directories` and `extension_binary`.
+3. Register an instance in [usage/agents/\_\_init\_\_.py](usage/agents/__init__.py).
+4. Add `usage/static/assets/agents/<id>.svg`. It is also the top bar icon, which
+   GNOME recolors, so solid single-color shapes work best.
+5. Add parser and limit tests, and a row to [Supported agents](#supported-agents).
 
 ## Development and support
 
-The Python package is `usage`; the application command is `agent-usage`.
-Qt WebChannel connects the bundled UI directly to the collector. The same
-readers, SQLite archive, calculations and renderer power the live widget, demo
-and packaged builds. Python’s standard library handles collection and storage;
-Qt provides the desktop window, rendering and native dialogs.
+The Python package is `usage`; the command is `agent-usage`. Qt WebChannel connects
+the bundled UI to the collector, and the same code serves the live widget, the demo
+and packaged builds.
 
 ```sh
 uv sync --locked
 uv run ruff check .
 uv run ruff format --check .
 uv run python -m unittest discover -s tests -v
-node --check usage/static/assets/app.js
+node --test tests/gnome.test.mjs
 uv build
 ```
 
-To build a portable app, run `uv run --group build python scripts/package.py`.
-Then run `node tests/smoke.mjs dist/agent-usage/agent-usage` (use `agent-usage.exe`
-on Windows). Build on the target operating system. Node 22+ is used only by
-the packaged UI test. Tags matching the package version, such as `v0.1.0`, trigger
-checks, native builds, checksums and a GitHub release.
+To build a portable app, run `uv run --group build python scripts/package.py`, then
+`node tests/smoke.mjs dist/agent-usage/agent-usage` (`agent-usage.exe` on Windows).
+Build on the target operating system; Node 22+ is needed for the UI tests. Tags
+matching the package version, such as `v0.1.0`, trigger checks, native builds,
+checksums and a GitHub release.
 
-Report reproducible bugs through [Issues](https://github.com/RanulfoMNeto/agent-usage/issues).
-Include versions and redacted screenshots, never full transcripts or credentials.
-Keep pull requests focused, reuse the existing readers and UI components, and
-add regression tests for behavioral changes. Report vulnerabilities privately
-through the repository's **Security → Report a vulnerability** option.
+Report reproducible bugs through [Issues](https://github.com/RanulfoMNeto/agent-usage/issues)
+with versions and redacted screenshots, never transcripts or credentials. Keep pull
+requests focused and add regression tests for behavioral changes. Report
+vulnerabilities privately through **Security → Report a vulnerability**.
 
-[MIT](LICENSE). Third-party assets retain their licenses. Portable builds bundle
-Qt/PySide and their runtime dependencies; see the included license notices.
-Maintained by [RanulfoMNeto](https://github.com/RanulfoMNeto). Independent of OpenAI
-and Anthropic; their names and logos identify the supported agents.
+[MIT](LICENSE). Third-party assets retain their licenses; portable builds include
+the Qt/PySide notices. Maintained by [RanulfoMNeto](https://github.com/RanulfoMNeto).
+Independent of the agents' vendors; their names and logos only identify supported agents.

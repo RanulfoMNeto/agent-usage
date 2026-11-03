@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title description">
   <title id="title">Agent Usage</title>
-  <desc id="description">A local desktop widget for Codex and Claude Code usage, limits and resets. Linux and Windows.</desc>
+  <desc id="description">A local desktop widget for coding agent usage, limits and resets. Linux and Windows.</desc>
   <rect width="1280" height="320" rx="24" fill="#111315"/>
   <rect x="1" y="1" width="1278" height="318" rx="23" fill="none" stroke="#2c3335"/>
   <g transform="translate(58 64) scale(3)">
@@ -16,9 +16,9 @@
     <text x="234" y="279" fill="#8f999b" font-size="16">LINUX + WINDOWS</text>
     <path d="M886 68v184" stroke="#2c3335"/>
     <circle cx="943" cy="115" r="6" fill="#8cc7be"/>
-    <text x="965" y="123" fill="#edf0ef" font-size="25">Codex</text>
-    <circle cx="943" cy="175" r="6" fill="#d97757"/>
-    <text x="965" y="183" fill="#edf0ef" font-size="25">Claude Code</text>
-    <text x="937" y="235" fill="#8f999b" font-size="16">One local widget.</text>
+    <text x="965" y="123" fill="#edf0ef" font-size="25">Limits and resets</text>
+    <circle cx="943" cy="175" r="6" fill="#d6ece1"/>
+    <text x="965" y="183" fill="#edf0ef" font-size="25">Daily activity</text>
+    <text x="937" y="235" fill="#8f999b" font-size="16">For every supported agent.</text>
   </g>
 </svg>

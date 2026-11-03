@@ -1,133 +1,108 @@
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from usage.agents import AGENTS
+from usage.desktop import top_bar_limits
 from usage.integration import (
     UUID,
     ConnectionUnavailable,
-    agent_command,
-    claude_terminal_command,
     install_gnome,
     install_windows_shortcut,
     launch_command,
-    open_claude_terminal,
-    owns_claude_command,
-    remove_legacy_claude_statusline,
+    open_terminal,
+    terminal_command,
 )
 
 
 class IntegrationTests(unittest.TestCase):
-    def test_retired_capture_migration_preserves_custom_settings_and_backups(self):
-        from PySide6.QtCore import QSaveFile
-
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "settings.json"
-            legacy = "'/old install/agent-usage' --capture-claude"
-            custom = {"type": "command", "command": "custom-status"}
-            backup = path.with_name(path.name + ".agent-usage.bak")
-            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": folder}):
-                remove_legacy_claude_statusline()
-                self.assertFalse(path.exists())
-                original = json.dumps({"theme": "dark", "statusLine": custom}).encode()
-                path.write_bytes(original)
-                remove_legacy_claude_statusline()
-                self.assertEqual(path.read_bytes(), original)
-                backup.write_bytes(original)
-                path.write_text(
-                    json.dumps(
-                        {"theme": "light", "statusLine": {"type": "command", "command": legacy}}
-                    )
-                )
-                before = path.read_bytes()
-                with patch("PySide6.QtCore.QSaveFile.commit", return_value=False):
-                    with self.assertRaises(OSError):
-                        remove_legacy_claude_statusline()
-                self.assertEqual(path.read_bytes(), before)
-                # Concurrent edits must never be overwritten during migration.
-                open_file = QSaveFile.open
-
-                def change(output, mode):
-                    path.write_bytes(original)
-                    return open_file(output, mode)
-
-                with patch("PySide6.QtCore.QSaveFile.open", new=change):
-                    with self.assertRaises(OSError):
-                        remove_legacy_claude_statusline()
-                self.assertEqual(path.read_bytes(), original)
-                path.write_bytes(before)
-                remove_legacy_claude_statusline()
-                self.assertEqual(
-                    json.loads(path.read_text()), {"theme": "light", "statusLine": custom}
-                )
-                self.assertEqual(backup.read_bytes(), original)
-                saved = path.read_bytes()
-                remove_legacy_claude_statusline()
-                self.assertEqual(path.read_bytes(), saved)
-                backup.unlink()
-                path.write_bytes(before)
-                remove_legacy_claude_statusline()
-                self.assertEqual(json.loads(path.read_text()), {"theme": "light"})
-            for command in (legacy, "python -m usage --capture-claude"):
-                self.assertTrue(owns_claude_command(command))
-            for command in ("echo --capture-claude", legacy + " | custom", "custom-status"):
-                self.assertFalse(owns_claude_command(command))
-
-    def test_claude_discovery_and_terminal_arguments_are_portable(self):
+    def test_sign_in_terminal_arguments_are_never_interpreted_by_a_shell(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
+            command = [str(home / "Agent $data; & binary"), "a b"]
             with (
                 patch("usage.integration.Path.home", return_value=home),
                 patch("usage.integration.shutil.which", return_value=None) as which,
             ):
-                for system, name in (("linux", "claude"), ("win32", "claude.exe")):
-                    with self.subTest(system=system), patch("sys.platform", system):
-                        binary = (
-                            home
-                            / ".vscode/extensions/anthropic.claude-code-2.1.301/resources/native-binary"
-                            / name
+                with patch("sys.platform", "win32"):
+                    self.assertEqual(terminal_command(command), command)
+                    with (
+                        patch("usage.integration.subprocess.Popen") as launch,
+                        patch("usage.integration.subprocess.CREATE_NEW_CONSOLE", 16, create=True),
+                    ):
+                        open_terminal(command)
+                        launch.assert_called_once_with(command, cwd=home, creationflags=16)
+                with patch("sys.platform", "linux"):
+                    with self.assertRaises(ConnectionUnavailable):
+                        terminal_command(command)
+                    which.side_effect = lambda name: (
+                        "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+                    )
+                    args = terminal_command(["~/bin/agent", "--login"])
+                    expanded = str(Path("~/bin/agent").expanduser())
+                    self.assertEqual(args, ["/usr/bin/gnome-terminal", "--", expanded, "--login"])
+                    with patch(
+                        "PySide6.QtCore.QProcess.startDetached", return_value=(True, 123)
+                    ) as launch:
+                        open_terminal(args)
+                        launch.assert_called_once_with(args[0], args[1:], str(home))
+                    with (
+                        patch("PySide6.QtCore.QProcess.startDetached", return_value=(False, 0)),
+                        self.assertRaises(ConnectionUnavailable),
+                    ):
+                        open_terminal(args)
+
+    @unittest.skipUnless(shutil.which("node"), "Node runs the top bar module outside the shell")
+    def test_top_bar_accepts_the_payload_the_app_publishes(self):
+        now = time.time()
+        snapshot = {
+            "agents": [
+                dict(
+                    id=agent,
+                    status="available",
+                    updated_at=now,
+                    connected=True,
+                    windows=[
+                        dict(
+                            id=f"{agent}::300",
+                            bucket=None,
+                            minutes=300,
+                            used_percent=20 + index,
+                            resets_at=now + 3600,
                         )
-                        binary.parent.mkdir(parents=True, exist_ok=True)
-                        binary.touch()
-                        binary.chmod(0o700)
-                        self.assertEqual(agent_command("claude", ["claude"]), [str(binary)])
-                        if system == "win32":
-                            self.assertEqual(claude_terminal_command(["claude"]), [str(binary)])
-                            with (
-                                patch("usage.integration.subprocess.Popen") as launch,
-                                patch(
-                                    "usage.integration.subprocess.CREATE_NEW_CONSOLE",
-                                    16,
-                                    create=True,
-                                ),
-                            ):
-                                open_claude_terminal([str(binary)])
-                                launch.assert_called_once_with(
-                                    [str(binary)], cwd=home, creationflags=16
-                                )
-                        else:
-                            with self.assertRaises(ConnectionUnavailable):
-                                claude_terminal_command(["claude"])
-                            which.side_effect = lambda name: (
-                                "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
-                            )
-                            override = [str(home / "Claude $data; & binary"), "a b"]
-                            args = claude_terminal_command(override)
-                            self.assertEqual(args, ["/usr/bin/gnome-terminal", "--", *override])
-                            with patch(
-                                "PySide6.QtCore.QProcess.startDetached", return_value=(True, 123)
-                            ) as launch:
-                                open_claude_terminal(args)
-                                launch.assert_called_once_with(args[0], args[1:], str(home))
-                            which.side_effect = None
-                        binary.unlink()
-                        with self.assertRaises(ConnectionUnavailable):
-                            claude_terminal_command(["claude"])
+                    ],
+                )
+                for index, agent in enumerate(AGENTS)
+            ]
+        }
+        payload = json.dumps(top_bar_limits(snapshot, AGENTS, 80, True))
+        module = (Path(__file__).parents[1] / "usage/gnome/limits.js").as_uri()
+        script = (
+            f"import {{accepts, summarize}} from {json.dumps(module)};"
+            "const payload = JSON.parse(process.argv[1]);"
+            "const {agents, shown} = summarize(payload, Date.now() / 1000, process.argv[2].split(','));"
+            "console.log(JSON.stringify([accepts(payload), agents.map(a => a.name),"
+            " shown.map(l => l.id)]));"
+        )
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script, payload, f"{list(AGENTS)[-1]}::300"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        accepted, names, shown = json.loads(result.stdout)
+        self.assertTrue(accepted)
+        self.assertEqual(sorted(names), sorted(agent.name for agent in AGENTS.values()))
+        self.assertEqual(shown, [f"{list(AGENTS)[-1]}::300"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows shortcuts require the native shell")
     def test_start_menu_shortcut_preserves_arguments_and_updates_after_moving(self):
@@ -179,10 +154,6 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(Path(actual["TargetPath"]), moved)
                 self.assertEqual(actual["Arguments"], "")
 
-    def test_windowed_python_uses_console_python_for_capture(self):
-        with patch("sys.executable", str(Path("venv") / "pythonw.exe")):
-            self.assertEqual(Path(launch_command()[0]).name, "python.exe")
-
     def test_install_reinstall_remove_preserve_other_extensions_and_history(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -205,11 +176,23 @@ class IntegrationTests(unittest.TestCase):
                 patch("usage.integration.command", side_effect=command),
             ):
                 install_gnome()
+                stale = root / "gnome-shell/extensions" / UUID / "icons/retired-symbolic.svg"
+                stale.touch()
                 install_gnome()
+                self.assertFalse(stale.exists())
                 self.assertEqual(settings["enabled-extensions"], ["existing@example", UUID])
                 self.assertEqual(settings["disabled-extensions"], [])
                 extension = root / "gnome-shell/extensions" / UUID
-                self.assertTrue((extension / "extension.js").is_file())
+                for name in ("extension.js", "limits.js", "stylesheet.css"):
+                    self.assertTrue((extension / name).is_file())
+                # Each registered agent's widget icon becomes its recolorable top bar icon.
+                self.assertEqual(
+                    sorted(path.name for path in (extension / "icons").iterdir()),
+                    sorted(
+                        ["agent-usage-symbolic.svg", "clock-symbolic.svg"]
+                        + [f"{agent}-symbolic.svg" for agent in AGENTS]
+                    ),
+                )
                 self.assertIn("-m", (root / "autostart/agent-usage.desktop").read_text())
                 install_gnome(remove=True)
                 self.assertEqual(settings["enabled-extensions"], ["existing@example"])

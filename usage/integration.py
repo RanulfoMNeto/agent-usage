@@ -1,19 +1,18 @@
-"""Native desktop launchers and optional GNOME integration."""
+"""Desktop launchers, a sign-in terminal, and the optional GNOME integration."""
 
 import ast
-import base64
 import json
 import os
-import platform
-import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from .agents import AGENTS
+
 BUNDLE = Path(__file__).with_name("gnome")
+STATIC = Path(__file__).with_name("static")
 UUID = "agent-usage@agent-usage.local"
 
 
@@ -21,14 +20,8 @@ class ConnectionUnavailable(RuntimeError):
     """An actionable connection failure without command output or private paths."""
 
 
-def claude_terminal_command(command):
-    """Prepare an argument list; never ask a shell to interpret user paths."""
-    try:
-        args = agent_command("claude", command)
-    except FileNotFoundError:
-        raise ConnectionUnavailable(
-            "Install Claude Code or its official VS Code extension."
-        ) from None
+def terminal_command(args):
+    """Run an argument list in the desktop terminal; never ask a shell to interpret paths."""
     args = [str(Path(arg).expanduser()) if arg.startswith("~") else arg for arg in args]
     if sys.platform == "win32":
         return args
@@ -44,7 +37,7 @@ def claude_terminal_command(command):
     raise ConnectionUnavailable("No supported terminal found. Install a desktop terminal.")
 
 
-def open_claude_terminal(args):
+def open_terminal(args):
     """Keep the interactive session separate from the widget's lifetime."""
     try:
         if sys.platform == "win32":
@@ -58,49 +51,7 @@ def open_claude_terminal(args):
             return None
     except OSError:
         pass
-    raise ConnectionUnavailable("Could not open the Claude terminal. Try connecting again.")
-
-
-def agent_command(agent, command):
-    """Reuse a native installation when the default command is not on PATH."""
-    if agent not in ("codex", "claude"):
-        raise ValueError("Unknown agent")
-    if command != [agent]:
-        return command
-    windows = sys.platform == "win32"
-    name = agent + (".exe" if windows else "")
-    found = shutil.which(name)
-    # Do not auto-discover a program in the current project or Downloads directory.
-    if found and Path(found).is_absolute() and Path(found).parent != Path.cwd():
-        return [found]
-    home = Path.home()
-    installed = (
-        Path(os.environ.get("LOCALAPPDATA") or home / "AppData/Local") / "Programs/OpenAI/Codex/bin"
-        if windows and agent == "codex"
-        else home / ".local/bin"
-    )
-    directory = os.environ.get("CODEX_INSTALL_DIR") if agent == "codex" else None
-    candidates = [Path(directory or installed).expanduser() / name]
-    machine = platform.machine().lower()
-    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
-    target = ("windows" if windows else "linux") + "-" + architecture
-    prefix = "openai.chatgpt" if agent == "codex" else "anthropic.claude-code"
-    for editor in (".vscode", ".vscode-insiders", ".cursor"):
-        extensions = (home / editor / "extensions").glob(prefix + "-*")
-        for extension in sorted(
-            extensions,
-            key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
-            reverse=True,
-        ):
-            candidates.append(
-                extension / "bin" / target / name
-                if agent == "codex"
-                else extension / "resources/native-binary" / name
-            )
-    for candidate in candidates:
-        if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
-            return [str(candidate)]
-    raise FileNotFoundError("Agent executable unavailable")
+    raise ConnectionUnavailable("Could not open a terminal. Try connecting again.")
 
 
 def command(*args):
@@ -108,89 +59,12 @@ def command(*args):
 
 
 def launch_command(config=None):
-    executable = Path(sys.executable)
-    # A Start-menu launch uses pythonw; status-line capture still needs standard I/O.
-    if executable.name.lower() == "pythonw.exe" and not getattr(sys, "frozen", False):
-        executable = executable.with_name("python.exe")
-    args = [str(executable)]
+    args = [sys.executable]
     if not getattr(sys, "frozen", False):
         args.extend(["-I", "-m", "usage"])
     if config:
         args.extend(["--config", str(Path(config).resolve())])
     return args
-
-
-def owns_claude_command(command):
-    """Recognize our generated commands, including the previous manual installation."""
-    if not isinstance(command, str):
-        return False
-    try:
-        args = shlex.split(command)
-        # Older installations wrapped the capture in a working-directory change.
-        if len(args) > 3 and args[0] == "cd" and args[2] == "&&":
-            args = args[3:]
-        if args[:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"]:
-            return len(args) == 5 and base64.b64decode(args[4], validate=True).decode(
-                "utf-16-le"
-            ).startswith("# Agent Usage status line\n")
-        executable = Path(args.pop(0)).name.lower()
-        if args[:1] == ["-I"]:
-            args = args[1:]
-        if args[:2] == ["-m", "usage"] and executable.startswith("python"):
-            args = args[2:]
-        elif executable not in ("agent-usage", "agent-usage.exe"):
-            return False
-        if args[:1] == ["--config"] and len(args) >= 3:
-            args = args[2:]
-        return args == ["--capture-claude"]
-    except (ValueError, IndexError, UnicodeError):
-        return False
-
-
-def remove_legacy_claude_statusline():
-    """Remove only our retired capture; restore a backed-up custom status line."""
-    from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
-
-    directory = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
-    path = directory / "settings.json"
-    if not path.is_file():
-        return
-    lock = QLockFile(str(path) + ".agent-usage.lock")
-    if not lock.tryLock(0):
-        raise OSError("Claude settings are busy")
-    try:
-        original = path.read_bytes()
-        settings = json.loads(original.decode("utf-8-sig"))
-        current = settings.get("statusLine") if isinstance(settings, dict) else None
-        if not isinstance(current, dict) or not owns_claude_command(current.get("command")):
-            return
-        settings.pop("statusLine")
-        backups = sorted(
-            directory.glob("settings.json.agent-usage*.bak"),
-            key=lambda p: p.stat().st_mtime_ns,
-            reverse=True,
-        )
-        for backup in backups:
-            try:
-                prior = json.loads(backup.read_text(encoding="utf-8-sig")).get("statusLine")
-            except (OSError, ValueError, AttributeError):
-                continue
-            if isinstance(prior, dict) and not owns_claude_command(prior.get("command")):
-                settings["statusLine"] = prior
-                break
-            if prior is None:
-                break
-        body = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode()
-        output = QSaveFile(str(path))
-        if not output.open(QIODevice.OpenModeFlag.WriteOnly):
-            raise OSError("Claude settings are not writable")
-        if path.read_bytes() != original or output.write(body) != len(body):
-            output.cancelWriting()
-            raise OSError("Claude settings changed during migration")
-        if not output.commit():
-            raise OSError("Could not save Claude settings")
-    finally:
-        lock.unlock()
 
 
 def install_windows_shortcut(config=None):
@@ -251,7 +125,7 @@ def desktop_entry(config=None):
             raise ValueError("Invalid launcher path")
         escaped = "".join("\\" + c if c in '\\"`$' else c for c in arg)
         quoted.append('"' + escaped.replace("\\", "\\\\").replace("%", "%%") + '"')
-    icon = Path(__file__).with_name("static") / "assets/widget.svg"
+    icon = STATIC / "assets/widget.svg"
     return (
         "[Desktop Entry]\nType=Application\nName=Agent Usage\n"
         f"Exec={' '.join(quoted)}\nIcon={icon}\nTerminal=false\n"
@@ -294,9 +168,17 @@ def install_gnome(config=None, *, remove=False):
     with tempfile.TemporaryDirectory(prefix="agent-usage-extension-") as folder:
         staged = Path(folder) / UUID
         shutil.copytree(BUNDLE, staged)
+        # The shell recolors -symbolic icons, so each agent's widget icon serves the top bar.
+        for agent in AGENTS:
+            shutil.copyfile(
+                STATIC / "assets/agents" / f"{agent}.svg",
+                staged / "icons" / f"{agent}-symbolic.svg",
+            )
         command("glib-compile-schemas", "--strict", str(staged / "schemas"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(staged, target, dirs_exist_ok=True)
+        # Replace the whole extension so files from earlier versions never linger.
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(staged, target)
     for entry in entries:
         entry.parent.mkdir(parents=True, exist_ok=True)
         entry.write_text(desktop_entry(config), encoding="utf-8")
@@ -318,8 +200,28 @@ def install_gnome(config=None, *, remove=False):
     return "GNOME integration installed. Sign out and back in to load it and start the widget."
 
 
+def gnome_session():
+    return sys.platform == "linux" and "GNOME" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+
+def gnome_commands(receiver, slot):
+    """Receive top bar menu actions; each names the process it addresses."""
+    if not gnome_session():
+        return False
+    from PySide6.QtDBus import QDBusConnection
+
+    return QDBusConnection.sessionBus().connect(
+        "org.gnome.Shell",
+        "/org/agentusage/Desktop",
+        "org.agentusage.Desktop",
+        "Command",
+        receiver,
+        slot,
+    )
+
+
 def gnome_call(method, *args):
-    if sys.platform != "linux" or "GNOME" not in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+    if not gnome_session():
         return False
     from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 

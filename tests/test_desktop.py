@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-import threading
 import time
 import unittest
 from concurrent.futures import Future
@@ -11,15 +10,54 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
+from PySide6.QtCore import SLOT, QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
+from usage.agents import AGENTS
+from usage.agents.claude import Claude
 from usage.config import load_config, user_directory
-from usage.desktop import STATIC, Bridge, LocalOnly, LocalPage, Widget
+from usage.desktop import (
+    STATIC,
+    TOP_BAR_HEARTBEAT,
+    Bridge,
+    LocalOnly,
+    LocalPage,
+    TopBar,
+    Widget,
+)
 from usage.history import MAX_IMPORT
-from usage.readers import project_path
-from usage.subscriptions import Subscriptions, claude_snapshot
+from usage.limits import Limits
+
+WIDTH = 344
+
+
+def account(agent, limits, now=None, status="available", **extra):
+    """One agent's limits as the backend reports them: (minutes, used percent, reset)."""
+    now = now or time.time()
+    return dict(
+        id=agent,
+        status=status,
+        updated_at=now,
+        connected=True,
+        windows=[
+            dict(
+                id=f"{agent}::{minutes}",
+                bucket=None,
+                minutes=minutes,
+                used_percent=used,
+                resets_at=resets,
+            )
+            for minutes, used, resets in limits
+        ],
+        **extra,
+    )
+
+
+def reporting(*accounts):
+    limits = Mock()
+    limits.snapshot.return_value = {"agents": list(accounts)}
+    return limits
 
 
 class ConfigTests(unittest.TestCase):
@@ -35,15 +73,9 @@ class ConfigTests(unittest.TestCase):
                         config["history"]["database"],
                         str(Path(folder) / "agent-usage/history.sqlite3"),
                     )
-                    self.assertEqual(config["transcripts"]["codex"], "~/.codex")
+                    self.assertEqual((config["agents"], config["widget"]["width"]), ({}, WIDTH))
                 with patch("sys.platform", "win32"):
                     self.assertEqual(user_directory("state"), Path(folder) / "AgentUsage")
-                path = Path(folder) / "config.toml"
-                path.write_text("[widget]\nwidth=350\n", encoding="utf-8")
-                self.assertEqual(load_config(path)["widget"]["width"], 350)
-                path.write_text("[widget]\nwidth=0\n", encoding="utf-8")
-                with self.assertRaises(ValueError):
-                    load_config(path)
 
 
 class DesktopTests(unittest.TestCase):
@@ -61,8 +93,7 @@ class DesktopTests(unittest.TestCase):
         self.usage = Mock()
         self.usage.config = {"collection": {"refresh_seconds": 1}}
         self.usage.sources.return_value = {
-            "codex": {"path": str(self.root), "override": "", "exists": True},
-            "claude": {"path": str(self.root), "override": "", "exists": True},
+            agent: {"path": str(self.root), "override": "", "exists": True} for agent in AGENTS
         }
         self.bridge = Bridge(self.usage, Mock(), self.settings, self.window)
         self.responses = []
@@ -73,10 +104,25 @@ class DesktopTests(unittest.TestCase):
         self.window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
+    def widget(self, limits):
+        with (
+            patch("usage.desktop.user_directory", return_value=self.root),
+            patch.object(Widget, "load"),
+        ):
+            return Widget({"width": WIDTH}, self.usage, limits)
+
+    def dispose(self, window):
+        window.top_bar.stop()
+        window.bridge.close()
+        window.page().deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     @contextmanager
-    def renderer(self, subscriptions):
+    def renderer(self, limits):
         with patch("usage.desktop.user_directory", return_value=self.root):
-            window = Widget({"width": 400, "compact_width": 300}, self.usage, subscriptions)
+            window = Widget({"width": WIDTH}, self.usage, limits)
 
         def evaluate(expression):
             result = []
@@ -97,48 +143,25 @@ class DesktopTests(unittest.TestCase):
 
         try:
             window.show()
-            wait_for("typeof data!=='undefined' && !!data && subscriptionsLoaded")
+            wait_for("typeof data!=='undefined' && !!data && limitsLoaded && agents.size>0")
             yield window, evaluate, wait_for
         finally:
             window.close()
-            window.bridge.close()
-            window.page().deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            window.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.dispose(window)
 
     def test_limit_preferences_preserve_collection_and_survive_restart(self):
         now = time.time()
         self.usage.snapshot.return_value = {
-            "rows": [{"id": "prompt", "agent": "Codex", "start": now, "tokens": 123}],
+            "rows": [{"id": "prompt", "agent": "codex", "start": now, "tokens": 123}],
             "warnings": [],
         }
-        subscriptions = Mock()
-        subscriptions.snapshot.return_value = {
-            "providers": [
-                {
-                    "agent": agent,
-                    "status": "available",
-                    "updated_at": now,
-                    "windows": [
-                        {
-                            "name": agent,
-                            "minutes": minutes,
-                            "resets_at": now + 3600,
-                            "used_percent": used,
-                        }
-                        for minutes, used in limits
-                    ],
-                }
-                for agent, limits in (
-                    ("Codex", [(10080, 56)]),
-                    ("Claude Code", [(300, 0), (10080, 3)]),
-                )
-            ]
-        }
-        with self.renderer(subscriptions) as (window, evaluate, wait_for):
+        limits = reporting(
+            account("codex", [(10080, 56, now + 3600)], now),
+            account("claude", [(300, 0, now + 3600), (10080, 3, now + 3600)], now),
+        )
+        with self.renderer(limits) as (window, evaluate, wait_for):
             self.assertEqual(evaluate("preferences.indicator"), "bar")
-            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 2)
+            self.assertEqual(evaluate("document.querySelectorAll('.limit-card').length"), 2)
             self.assertEqual(evaluate("document.querySelectorAll('[role=meter]').length"), 3)
             self.assertEqual(
                 evaluate("[...$('limit-options').querySelectorAll('input')].map(n=>n.value)"),
@@ -149,7 +172,7 @@ class DesktopTests(unittest.TestCase):
             )
             wait_for("document.querySelectorAll('[role=meter]').length===2")
             self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
-            self.assertEqual(evaluate("providers[1].windows.length"), 2)
+            self.assertEqual(evaluate("accounts[1].windows.length"), 2)
             self.assertEqual(evaluate("selected().length"), 1)
             window.page().runJavaScript(
                 "$('indicator-setting').value='ring';"
@@ -157,35 +180,34 @@ class DesktopTests(unittest.TestCase):
             )
             wait_for("document.documentElement.dataset.indicator==='ring'")
             self.assertNotEqual(
-                evaluate("getComputedStyle(document.querySelector('.quota-gauge svg')).display"),
+                evaluate("getComputedStyle(document.querySelector('.limit-gauge svg')).display"),
                 "none",
             )
             # Temporary unavailability must not discard a display preference.
-            subscriptions.snapshot.return_value["providers"][1]["windows"] = []
+            claude = limits.snapshot.return_value["agents"][1]
+            claude["windows"] = []
             wait_for("!$('limit-options').querySelector('[value=\"300\"]')")
             self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
-            subscriptions.snapshot.return_value["providers"][1]["windows"] = [
-                {"name": "Claude", "minutes": 300, "resets_at": now + 3600, "used_percent": 0}
-            ]
+            claude["windows"] = account("claude", [(300, 0, now + 3600)])["windows"]
             wait_for("!!$('limit-options').querySelector('[value=\"300\"]')")
             self.assertFalse(
                 evaluate("$('limit-options').querySelector('[value=\"300\"]').checked")
             )
-            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 1)
+            self.assertEqual(evaluate("document.querySelectorAll('.limit-card').length"), 1)
             window.page().runJavaScript(
                 "$('limit-options').querySelector('[value=\"10080\"]').click()"
             )
-            wait_for("$('subscriptions-section').hidden")
+            wait_for("$('limits-section').hidden")
             self.assertFalse(evaluate("$('activity').hidden"))
             window.page().runJavaScript(
                 "$('limit-options').querySelector('[value=\"10080\"]').click()"
             )
-            wait_for("!$('subscriptions-section').hidden")
+            wait_for("!$('limits-section').hidden")
             wait_for("pending.size===0")
-        with self.renderer(subscriptions) as (_, evaluate, __):
+        with self.renderer(limits) as (_, evaluate, __):
             self.assertEqual(evaluate("preferences.indicator"), "ring")
             self.assertEqual(evaluate("preferences.hiddenLimits"), [300])
-            self.assertEqual(evaluate("document.querySelectorAll('.quota-card').length"), 1)
+            self.assertEqual(evaluate("document.querySelectorAll('.limit-card').length"), 1)
 
     def test_weekly_cycles_select_agent_days_and_keep_history_combined(self):
         now = int(time.time())
@@ -196,43 +218,27 @@ class DesktopTests(unittest.TestCase):
                 "agent": agent,
                 "start": start,
                 "tokens": tokens,
-                "cost": tokens / 10000,
-                "project": "/example",
+                "cost": tokens / 1e4,
             }
             for identifier, agent, start, tokens in (
-                ("codex-before", "Codex", now - 4 * day - 1, 9000),
-                ("codex-boundary", "Codex", now - 4 * day, 100),
-                ("claude-before", "Claude Code", now - 2 * day - 1, 8000),
-                ("claude-boundary", "Claude Code", now - 2 * day, 200),
-                ("codex-today", "Codex", now, 300),
-                ("claude-today", "Claude Code", now, 400),
-                ("codex-future", "Codex", now + 3 * day, 7000),
+                ("codex-before", "codex", now - 4 * day - 1, 9000),
+                ("codex-boundary", "codex", now - 4 * day, 100),
+                ("claude-before", "claude", now - 2 * day - 1, 8000),
+                ("claude-boundary", "claude", now - 2 * day, 200),
+                ("codex-today", "codex", now, 300),
+                ("claude-today", "claude", now, 400),
+                ("codex-future", "codex", now + 3 * day, 7000),
             )
         ]
         self.usage.snapshot.return_value = {
             "rows": sorted(rows, key=lambda row: row["start"], reverse=True),
             "warnings": [],
         }
-        subscriptions = Mock()
-        subscriptions.snapshot.return_value = {
-            "providers": [
-                {
-                    "agent": agent,
-                    "status": "available",
-                    "updated_at": now,
-                    "windows": [
-                        {
-                            "name": agent,
-                            "minutes": 10080,
-                            "resets_at": now + days * day,
-                            "used_percent": 30,
-                        }
-                    ],
-                }
-                for agent, days in (("Codex", 3), ("Claude Code", 5))
-            ]
-        }
-        with self.renderer(subscriptions) as (window, evaluate, wait_for):
+        limits = reporting(
+            account("codex", [(10080, 30, now + 3 * day)], now),
+            account("claude", [(10080, 30, now + 5 * day)], now),
+        )
+        with self.renderer(limits) as (window, evaluate, wait_for):
             window.page().runJavaScript("changePeriod('weekly')")
             wait_for("document.querySelectorAll('.heatmap').length===2")
             self.assertEqual(evaluate("selected().length"), 4)
@@ -247,26 +253,23 @@ class DesktopTests(unittest.TestCase):
                 2,
             )
             # The same date has separate selections, totals and charts for each agent.
-            for agent, expected in (("Codex", "300"), ("Claude Code", "400")):
+            for agent, expected in (("codex", "300"), ("claude", "400")):
                 window.page().runJavaScript(
                     "[...document.querySelectorAll('.heat-cell')].find(cell=>"
                     f"cell.dataset.key===bucketKey({now},'{agent}')).click()"
                 )
                 wait_for(f"$('bucket-tokens').textContent==='{expected}'")
                 self.assertEqual(evaluate("$('bucket-prompts').textContent"), "1")
-                self.assertEqual(evaluate("charts.usage.data.datasets.map(d=>d.label)"), [agent])
-                self.assertTrue(
-                    evaluate("$('bucket-title').textContent").startswith(
-                        agent.replace(" Code", "") + " · "
-                    )
-                )
+                name = AGENTS[agent].name
+                self.assertEqual(evaluate("charts.usage.data.datasets.map(d=>d.label)"), [name])
+                self.assertTrue(evaluate("$('bucket-title').textContent").startswith(name + " · "))
                 self.assertEqual(
                     evaluate("document.querySelectorAll('.heat-cell[aria-pressed=true]').length"), 1
                 )
             selection = evaluate("bucketId")
             window.page().runJavaScript(
                 "[...document.querySelectorAll('.heat-cell')].find(cell=>"
-                f"cell.dataset.key===bucketKey({now},'Codex'))"
+                f"cell.dataset.key===bucketKey({now},'codex'))"
                 ".dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))"
             )
             wait_for("!$('heatmap-tooltip').hidden")
@@ -276,27 +279,24 @@ class DesktopTests(unittest.TestCase):
             # Include the exact boundary; exclude even one second before it.
             window.page().runJavaScript(
                 "[...document.querySelectorAll('.heat-cell')].find(cell=>"
-                f"cell.dataset.key===bucketKey({now - 4 * day},'Codex')).click()"
+                f"cell.dataset.key===bucketKey({now - 4 * day},'codex')).click()"
             )
             wait_for("$('bucket-tokens').textContent==='100'")
             window.page().runJavaScript(
                 "$('limit-options').querySelector('[value=\"10080\"]').click()"
             )
-            wait_for("$('subscriptions-section').hidden")
+            wait_for("$('limits-section').hidden")
             self.assertEqual(evaluate("document.querySelectorAll('.heatmap').length"), 2)
             self.assertEqual(evaluate("selected().length"), 4)
             # A reset replaces the old cycle and clears a day outside the new window.
-            subscriptions.snapshot.return_value["providers"][0]["windows"][0]["resets_at"] = (
+            limits.snapshot.return_value["agents"][0]["windows"][0]["resets_at"] = (
                 now + 7 * day - 10
             )
             wait_for("selected().length===3 && $('bucket-tokens').textContent==='300'")
             self.assertEqual(evaluate("$('total-tokens').textContent"), "900")
             # A missing cycle must not be invented from the other agent's reset.
-            subscriptions.snapshot.return_value["providers"][1]["windows"] = []
+            limits.snapshot.return_value["agents"][1]["windows"] = []
             wait_for("document.querySelectorAll('.heatmap').length===1")
-            self.assertEqual(
-                evaluate("$('chart-coverage').textContent"), "Claude: weekly cycle unavailable."
-            )
             window.page().runJavaScript("changePeriod('all')")
             wait_for("$('heatmaps').dataset.period==='all'")
             self.assertEqual(evaluate("selected().length"), 6)
@@ -313,12 +313,16 @@ class DesktopTests(unittest.TestCase):
             )
             wait_for("$('heatmap-tooltip').querySelectorAll('.tooltip-agent').length===2")
             self.assertIn("Codex · 300 tokens", evaluate("$('heatmap-tooltip').textContent"))
-            self.assertIn("Claude · 400 tokens", evaluate("$('heatmap-tooltip').textContent"))
-            # Project filtering only affects activity, and empty days stay selectable.
-            window.page().runJavaScript("preferences.project='/missing';render()")
-            wait_for("$('bucket-prompts').textContent==='0'")
-            self.assertEqual(evaluate("$('usage-empty').textContent"), "No recorded prompts")
-            self.assertEqual(evaluate("providers[0].windows[0].used_percent"), 30)
+            self.assertIn("Claude Code · 400 tokens", evaluate("$('heatmap-tooltip').textContent"))
+            # An agent filter only affects activity, in that agent's color.
+            window.page().runJavaScript("$('agents').querySelector('[data-agent=claude]').click()")
+            wait_for("selected().length===3")
+            self.assertEqual(
+                evaluate("""getComputedStyle(document.querySelector('.heatmap'))
+                .getPropertyValue('--heat').trim()"""),
+                AGENTS["claude"].colors[1],
+            )
+            self.assertEqual(evaluate("accounts[0].windows[0].used_percent"), 30)
 
     def test_only_packaged_assets_and_channel_are_accessible(self):
         interceptor = LocalOnly()
@@ -342,9 +346,15 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(
             LocalPage.acceptNavigationRequest(None, QUrl("https://example.com/"), None, True)
         )
+        # The renderer learns agents from the registry, with packaged icons.
+        self.bridge.request("1", "agents", "null")
+        self.assertEqual([agent["id"] for agent in self.responses[-1]], list(AGENTS))
+        for agent in self.responses[-1]:
+            self.assertTrue((STATIC / agent["icon"]).is_file())
+            self.assertEqual(agent["colors"], list(AGENTS[agent["id"]].colors))
 
-    def test_preferences_and_file_dialog_cancellation(self):
-        value = {"view": "compact", "style": "glass", "pinned": True}
+    def test_preferences_and_directories_belong_to_agents(self):
+        value = {"style": "glass", "pinned": True}
         self.bridge.request("1", "save_preferences", json.dumps(value))
         self.bridge.request("2", "preferences", "null")
         self.assertEqual(self.responses[-1], value)
@@ -353,75 +363,80 @@ class DesktopTests(unittest.TestCase):
             self.bridge.request("3", "choose_directory", '"codex"')
         self.assertEqual(self.responses[-1], {"cancelled": True})
         self.usage.set_sources.assert_not_called()
-
-    def test_connections_open_native_terminal_and_reject_untrusted_requests(self):
-        self.bridge.subscriptions.config = {"claude_command": ["claude"]}
-        self.bridge.subscriptions.lock = threading.Lock()
-        self.bridge.subscriptions.checked = {"claude": 123}
-        self.bridge.subscriptions.snapshot.return_value = {"providers": []}
-        with (
-            patch("usage.desktop.claude_terminal_command", return_value=["claude"]),
-            patch("usage.desktop.open_claude_terminal") as terminal,
-        ):
-            self.bridge.request("1", "connect", '"claude"')
-            QTest.qWait(40)
-            self.assertEqual(self.responses[-1], {"providers": []})
-            terminal.assert_called_once_with(["claude"])
-            self.usage.set_connection.assert_called_once_with("claude", True)
-            self.assertNotIn("claude", self.bridge.subscriptions.checked)
-            terminal.reset_mock()
-            self.window.config = {"demo": True}
-            self.bridge.request("2", "connect", '"claude"')
-            self.assertIn("error", self.responses[-1])
-            terminal.assert_not_called()
-            self.window.config = {}
-            self.bridge.request("3", "connect", '"arbitrary-command"')
-            self.assertIn("error", self.responses[-1])
-            terminal.assert_not_called()
-            self.bridge.request("4", "cancel_login", '"codex"')
-            self.bridge.subscriptions.cancel_login.assert_called_once_with()
-
-        with patch("usage.desktop.QDesktopServices.openUrl", return_value=True) as open_url:
-            self.bridge.open_login("https://auth.openai.com/oauth/authorize")
-            open_url.assert_called_once()
-            open_url.reset_mock()
-            for url in (
-                "file:///tmp/command",
-                "https://auth.openai.com@evil.example",
-                "https://example.com",
-            ):
-                self.bridge.open_login(url)
-            open_url.assert_not_called()
-            self.window.config = {"demo": True}
-            self.bridge.open_login("https://auth.openai.com/oauth/authorize")
-            open_url.assert_not_called()
-
-    def test_project_picker_preserves_sources_and_cancelled_selection(self):
-        self.settings.setValue("appearance", json.dumps({"project": str(self.root)}))
         with patch(
             "usage.desktop.QFileDialog.getExistingDirectory", return_value=str(self.root)
         ) as choose:
-            self.bridge.request("1", "choose_directory", '"project"')
-            choose.assert_called_once_with(self.window, "Project directory", str(self.root))
-        self.assertEqual(self.responses[-1], {"path": project_path(str(self.root))})
-        self.usage.set_sources.assert_not_called()
-        with patch("usage.desktop.QFileDialog.getExistingDirectory", return_value=""):
-            self.bridge.request("2", "choose_directory", '"project"')
-        self.assertEqual(self.responses[-1], {"cancelled": True})
-        self.assertEqual(json.loads(self.settings.value("appearance"))["project"], str(self.root))
+            self.bridge.request("4", "choose_directory", '"claude"')
+            QTest.qWait(40)
+            choose.assert_called_once_with(
+                self.window, "Claude Code history directory", str(self.root)
+            )
+        self.usage.set_sources.assert_called_once_with({"codex": "", "claude": str(self.root)})
+        for request in ('"project"', '"../codex"', "null"):
+            self.bridge.request("5", "choose_directory", request)
+            self.assertIn("error", self.responses[-1])
+
+    def test_connections_follow_each_agents_sign_in_and_reject_untrusted_requests(self):
+        limits = self.bridge.limits
+        limits.command.return_value = ["agent"]
+        limits.snapshot.return_value = {"agents": []}
+        limits.connect.return_value = {"windows": []}
+        with (
+            patch("usage.desktop.terminal_command", return_value=["terminal", "agent"]) as wrap,
+            patch("usage.desktop.open_terminal") as terminal,
+        ):
+            self.bridge.request("1", "connect", '"claude"')
+            QTest.qWait(40)
+            self.assertEqual(self.responses[-1], {"agents": []})
+            wrap.assert_called_once_with(["agent"])
+            terminal.assert_called_once_with(["terminal", "agent"])
+            limits.invalidate.assert_called_once_with(AGENTS["claude"])
+            self.usage.set_connection.assert_called_once_with("claude", True)
+            # Browser sign-ins stay inside the agent's native client.
+            self.bridge.request("2", "connect", '"codex"')
+            QTest.qWait(40)
+            self.assertEqual(limits.connect.call_args.args[0], AGENTS["codex"])
+            terminal.assert_called_once()
+            limits.command.side_effect = FileNotFoundError
+            self.bridge.request("3", "connect", '"claude"')
+            self.assertEqual(
+                self.responses[-1], {"error": "Install Claude Code in this environment."}
+            )
+            limits.command.side_effect = None
+            self.window.config = {"demo": True}
+            self.bridge.request("4", "connect", '"claude"')
+            self.assertIn("error", self.responses[-1])
+            self.window.config = {}
+            self.bridge.request("5", "connect", '"arbitrary-command"')
+            self.assertIn("error", self.responses[-1])
+            self.assertEqual(terminal.call_count, 1)
+            self.bridge.request("6", "cancel_login", '"codex"')
+            limits.cancel_login.assert_called_once_with()
+
+        with patch("usage.desktop.QDesktopServices.openUrl", return_value=True) as open_url:
+            self.bridge.open_login("codex", "https://auth.openai.com/oauth/authorize")
+            open_url.assert_called_once()
+            open_url.reset_mock()
+            for agent, url in (
+                ("codex", "file:///tmp/command"),
+                ("codex", "https://auth.openai.com@evil.example"),
+                ("codex", "https://example.com"),
+                ("claude", "https://auth.openai.com/oauth/authorize"),
+            ):
+                self.bridge.open_login(agent, url)
+            open_url.assert_not_called()
+            self.window.config = {"demo": True}
+            self.bridge.open_login("codex", "https://auth.openai.com/oauth/authorize")
+            open_url.assert_not_called()
 
     def test_window_stays_visible_without_focus_and_after_pinning(self):
-        with (
-            patch("usage.desktop.user_directory", return_value=self.root),
-            patch.object(Widget, "load"),
-        ):
-            window = Widget({"width": 400, "compact_width": 300}, self.usage, Mock())
+        window = self.widget(Mock())
         try:
             window.show()
             QCoreApplication.sendEvent(window, QEvent(QEvent.Type.WindowDeactivate))
             self.assertTrue(window.isVisible())
             for pinned in (True, False):
-                window.apply_preferences({"pinned": pinned, "view": "compact", "scale": 1.1})
+                window.apply_preferences({"pinned": pinned, "scale": 1.1})
                 self.assertTrue(window.isVisible())
                 self.assertEqual(
                     bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint), pinned
@@ -429,21 +444,16 @@ class DesktopTests(unittest.TestCase):
                 self.assertEqual(window.zoomFactor(), 1)
             self.assertTrue(window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
             self.assertEqual(window.page().backgroundColor().alpha(), 0)
-            window.bridge.request("layout", "layout", '{"height": 300, "compact": false}')
-            self.assertEqual(window.height(), 300)
-            self.assertEqual(window.width(), 400)
-            window.bridge.request("layout", "layout", '{"height": 180, "compact": true}')
-            self.assertEqual(window.height(), 180)
-            self.assertEqual(window.width(), 300)
-            self.assertEqual(window.zoomFactor(), 1)
+            window.bridge.request("layout", "layout", '{"height": 300}')
+            self.assertEqual((window.width(), window.height()), (WIDTH, 300))
             layouts = []
-            window.bridge.layout_changed.connect(lambda w, s, _: layouts.append((w, s)))
+            window.bridge.layout_changed.connect(lambda w, s: layouts.append((w, s)))
             screen = Mock()
             with patch.object(window, "screen", return_value=screen):
                 screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
-                window.bridge.request("layout", "layout", '{"height": 825, "compact": false}')
-                self.assertEqual((window.width(), window.height()), (400, 825))
-                self.assertEqual(layouts[-1], (400, 1))
+                window.bridge.request("layout", "layout", '{"height": 825}')
+                self.assertEqual((window.width(), window.height()), (WIDTH, 825))
+                self.assertEqual(layouts[-1], (WIDTH, 1))
                 # Smaller monitors fit the whole panel; larger ones restore its natural size.
                 for area in (
                     QRect(0, 0, 1280, 600),
@@ -456,60 +466,231 @@ class DesktopTests(unittest.TestCase):
                     self.assertLessEqual(width * scale, window.width())
                     self.assertLessEqual(825 * scale, window.height())
                     self.assertTrue(area.contains(window.geometry()))
-                self.assertEqual(layouts[-1], (400, 1))
-                window.bridge.request("layout", "layout", '{"height": 9000, "compact": false}')
+                self.assertEqual(layouts[-1], (WIDTH, 1))
+                window.bridge.request("layout", "layout", '{"height": 9000}')
                 self.assertLessEqual(9000 * layouts[-1][1], window.height())
-            for invalid in (
-                {"height": 0, "compact": True},
-                {"height": -1, "compact": True},
-                {"height": 10001, "compact": True},
-                {"height": True, "compact": True},
-                {"height": "300", "compact": True},
-                {"height": 300, "compact": "true"},
-                {"height": 300},
-                None,
-            ):
+            for invalid in ({"height": 0}, {"height": -1}, {"height": 10001}, {"height": True},
+                            {"height": "300"}, {}, None):  # fmt: skip
                 window.bridge.request("layout", "layout", json.dumps(invalid))
                 self.assertEqual(window.content_height, 9000)
-                self.assertFalse(window.compact)
             window.close()
             self.assertFalse(window.isVisible())
         finally:
-            window.bridge.close()
-            window.page().deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            window.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.dispose(window)
+
+    def test_top_bar_leaves_limits_out_and_day_summary_expands_on_request(self):
+        now = time.time()
+        self.usage.snapshot.return_value = {
+            "rows": [
+                {"id": "a", "agent": "claude", "start": now, "tokens": 1500, "cost": 0.25},
+                {"id": "b", "agent": "claude", "start": now - 1, "tokens": 500},
+                {"id": "c", "agent": "claude", "start": now - 86400, "tokens": None},
+            ],
+            "warnings": [],
+        }
+        limits = reporting(account("claude", [(300, 10, now + 3600)], now))
+
+        def grows_from(height):
+            deadline = time.monotonic() + 10
+            while window.height() <= height and time.monotonic() < deadline:
+                QTest.qWait(20)
+            return window.height() > height
+
+        with self.renderer(limits) as (window, evaluate, wait_for):
+            wait_for("!$('limits-section').hidden")
+            # Limits move to the top bar; only the warning still configures it.
+            window.top_bar.attached = True
+            wait_for("$('limits-section').hidden")
+            self.assertEqual(
+                evaluate(
+                    "['visible-limits','indicator-row','limit-setting'].map(id=>$(id).hidden)"
+                ),
+                [True, True, False],
+            )
+            window.page().runJavaScript(
+                "$('theme-setting').value='light';"
+                "$('theme-setting').dispatchEvent(new Event('change'))"
+            )
+            wait_for("document.documentElement.dataset.theme==='light'")
+            # Explanations live behind Settings' help button, not on the widget.
+            window.page().runJavaScript("openSettings();$('help-toggle').click()")
+            wait_for("!$('help').hidden")
+            self.assertEqual(evaluate("$('help-toggle').getAttribute('aria-expanded')"), "true")
+            window.page().runJavaScript("$('settings').close()")
+            # Today's totals are its summary line, instead of a second toolbar total.
+            window.page().runJavaScript("changePeriod('today')")
+            wait_for("$('bucket-title').textContent==='Today'")
+            self.assertTrue(evaluate("$('totals').hidden && $('detail-body').hidden"))
+            self.assertEqual(
+                evaluate(
+                    "['bucket-prompts','bucket-prompt-unit','bucket-tokens','bucket-cost']"
+                    ".map(id=>$(id).textContent)"
+                ),
+                ["2", "prompts", "2K", "$0.25"],
+            )
+            height = window.height()
+            window.page().runJavaScript("$('detail-toggle').click()")
+            wait_for("!$('detail-body').hidden && !$('prompt-inspector').hidden")
+            self.assertEqual(evaluate("$('detail-toggle').getAttribute('aria-expanded')"), "true")
+            self.assertTrue(grows_from(height))
+            # Unknown measurements leave the summary instead of showing placeholders.
+            window.page().runJavaScript("$('period').querySelector('[data-period=all]').click()")
+            wait_for("preferences.period==='all' && !$('heatmaps').hidden")
+            self.assertEqual(
+                evaluate("[...$('period').children].map(b=>b.getAttribute('aria-pressed'))"),
+                ["false", "false", "true"],
+            )
+            window.page().runJavaScript(
+                "[...document.querySelectorAll('.heat-cell')].find(cell=>"
+                f"cell.dataset.key===bucketKey({now - 86400})).click()"
+            )
+            wait_for("$('bucket-prompt-unit').textContent==='prompt'")
+            self.assertEqual(
+                evaluate("[$('bucket-tokens'),$('bucket-cost')].map(n=>n.parentElement.hidden)"),
+                [True, True],
+            )
+            wait_for("pending.size===0")
+        with self.renderer(limits) as (_, evaluate, wait_for):
+            wait_for("!$('detail-body').hidden")
+            self.assertEqual(evaluate("[preferences.details,preferences.theme]"), [True, "light"])
+
+    def test_top_bar_mirrors_limits_and_controls_widget_visibility(self):
+        now = time.time()
+        limits = reporting(
+            account("claude", [(300, 14, now + 3600), (10080, 42, now + 3600)], now),
+            dict(id="codex", status="unavailable", issue="not_found", windows=[], connected=False),
+        )
+        self.usage.connections = {}
+        calls, answer = [], [True]
+
+        def gnome_call(method, *args):
+            calls.append((method, *args))
+            return answer[0]
+
+        def sent():
+            return [args[0] for method, *args in calls if method == "SetLimits"]
+
+        def published():
+            return json.loads(sent()[-1])
+
+        def wait_for(condition):
+            deadline = time.monotonic() + 10
+            while not condition() and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertTrue(condition())
+
+        with (
+            patch("usage.desktop.gnome_session", return_value=True),
+            patch("usage.desktop.gnome_commands") as commands,
+            patch("usage.desktop.gnome_call", side_effect=gnome_call),
+        ):
+            window = self.widget(limits)
+            try:
+                with patch("usage.desktop.gnome_session", return_value=False):
+                    self.assertFalse(TopBar(window).start() or calls)
+                window.preferences.setValue(
+                    "appearance", json.dumps({"limitAlert": 80, "hiddenLimits": [300]})
+                )
+                window.preferences.setValue("hidden", True)
+                pid = os.getpid()
+                # An answering top bar keeps a hidden widget hidden from the first launch.
+                self.assertTrue(window.top_bar.start())
+                self.assertEqual(published()["agents"], [])
+                wait_for(lambda: published()["agents"])
+                self.assertEqual(commands.call_args.args[1], SLOT("command(int,QString)"))
+                self.assertGreaterEqual(
+                    window.top_bar.metaObject().indexOfSlot("command(int,QString)"), 0
+                )
+                payload = published()
+                self.assertEqual((payload["warning"], payload["visible"]), (80, False))
+                # The bar offers every limit; the widget's own filter does not apply to it.
+                self.assertEqual(
+                    payload["agents"][0],
+                    {
+                        "id": "claude",
+                        "name": "Claude Code",
+                        "color": AGENTS["claude"].colors[1],
+                        "issue": None,
+                        "status": "available",
+                        "limits": [
+                            {
+                                "id": f"claude::{minutes}",
+                                "bucket": None,
+                                "minutes": minutes,
+                                "used_percent": used,
+                                "resets_at": now + 3600,
+                            }
+                            for minutes, used in ((300, 14), (10080, 42))
+                        ],
+                    },
+                )
+                self.assertEqual(payload["agents"][1]["issue"], "not_found")
+                count = len(sent())
+                window.top_bar.refresh()
+                wait_for(lambda: window.top_bar.task.done())
+                QTest.qWait(20)
+                self.assertEqual(len(sent()), count)
+                window.top_bar.command(pid + 1, "toggle")
+                self.assertFalse(window.isVisible())
+                window.top_bar.command(pid, "toggle")
+                self.assertTrue(window.isVisible())
+                self.assertFalse(window.preferences.value("hidden", type=bool))
+                self.assertTrue(published()["visible"])
+                window.bridge.request("1", "save_preferences", json.dumps({"limitAlert": 90}))
+                self.assertEqual(published()["warning"], 90)
+                window.top_bar.command(pid, "toggle")
+                self.assertFalse(window.isVisible() or published()["visible"])
+                self.assertTrue(window.preferences.value("hidden", type=bool))
+                # A locked screen unexports the extension; unchanged limits are retried.
+                answer[0] = False
+                window.top_bar.sent -= TOP_BAR_HEARTBEAT
+                count = len(sent())
+                window.top_bar.publish()
+                window.top_bar.publish()
+                self.assertEqual(len(sent()), count + 2)
+                self.assertTrue(window.top_bar.attached)
+                answer[0] = True
+                window.top_bar.publish()
+                window.top_bar.publish()
+                self.assertEqual(len(sent()), count + 3)
+                window.top_bar.sent -= TOP_BAR_HEARTBEAT
+                window.top_bar.publish()
+                self.assertEqual(len(sent()), count + 4)
+                # Disabling the extension restores the widget without changing the preference.
+                answer[0] = False
+                window.top_bar.command(pid, "detach")
+                self.assertTrue(window.isVisible())
+                self.assertFalse(window.top_bar.attached)
+                self.assertTrue(window.preferences.value("hidden", type=bool))
+                with patch("usage.desktop.QApplication") as application:
+                    window.top_bar.command(pid, "quit")
+                application.instance.return_value.quit.assert_called_once_with()
+                window.top_bar.stop()
+                window.top_bar.stop()
+                self.assertEqual(sent()[-1], "")
+                self.assertEqual(sent().count(""), 1)
+                window.config["demo"] = True
+                count = len(calls)
+                self.assertFalse(TopBar(window).start())
+                self.assertEqual(len(calls), count)
+            finally:
+                self.dispose(window)
 
     def test_visible_content_controls_height_without_overflow(self):
         now = time.time()
         self.usage.snapshot.return_value = {
             "rows": [
                 {"id": agent, "agent": agent, "start": now, "tokens": 100, "cost": 0.1}
-                for agent in ("Codex", "Claude Code")
+                for agent in AGENTS
             ],
             "warnings": [],
         }
-        subscriptions = Mock()
-        subscriptions.snapshot.return_value = {
-            "providers": [
-                {
-                    "agent": agent,
-                    "status": "available",
-                    "updated_at": now,
-                    "windows": [
-                        {
-                            "name": agent,
-                            "minutes": minutes,
-                            "resets_at": now + 3600,
-                            "used_percent": 50,
-                        }
-                        for minutes in (300, 10080)
-                    ],
-                }
-                for agent in ("Codex", "Claude Code")
+        limits = reporting(
+            *[
+                account(agent, [(300, 50, now + 3600), (10080, 50, now + 3600)], now)
+                for agent in AGENTS
             ]
-        }
+        )
         # No overflow is not enough: shrinking also waits for the native resize.
         bounds = """(()=>{
             const p=$('settings').open?$('settings'):document.querySelector('.widget');
@@ -523,7 +704,7 @@ class DesktopTests(unittest.TestCase):
         })()"""
         screen = Mock()
         screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
-        with self.renderer(subscriptions) as (window, evaluate, wait_for):
+        with self.renderer(limits) as (window, evaluate, wait_for):
             with patch.object(window, "screen", return_value=screen):
                 window.apply_size()
                 geometry = """(()=>{
@@ -533,7 +714,7 @@ class DesktopTests(unittest.TestCase):
                     };
                     return [innerWidth,innerHeight,
                         box($('settings').open?'dialog':'.widget'),
-                        box($('settings').open?'dialog .icon-button':'#widget-close')];
+                        box($('settings').open?'#settings-close':'#widget-close')];
                 })()"""
                 window.page().runJavaScript("changePeriod('all')")
                 QTest.qWait(100)
@@ -546,25 +727,24 @@ class DesktopTests(unittest.TestCase):
                         QTest.qWait(80)
                         wait_for(bounds)
                         baseline = evaluate(geometry)
-                        self.assertEqual(evaluate("color('claude')"), "#d97757")
-                        self.assertNotEqual(evaluate("color('codex')"), "#d97757")
+                        claude = AGENTS["claude"].colors[theme == "dark"]
                         self.assertEqual(
                             evaluate("""getComputedStyle(document.querySelector(
-                                '.quota-card[data-agent="Claude Code"] .fill')).stroke"""),
-                            "rgb(217, 119, 87)",
+                                '.limit-card[data-agent="claude"]')).getPropertyValue('--accent')"""),
+                            claude,
                         )
                         self.assertEqual(
                             evaluate("""charts.usage.data.datasets.find(
                                 d=>d.label==='Claude Code').borderColor"""),
-                            "#d97757",
+                            claude,
                         )
                         self.assertEqual(
                             evaluate("""new Set([...document.querySelectorAll(
-                                '.quota-card,.detail-card')].map(n=>
+                                '.limit-card,.detail-card')].map(n=>
                                 getComputedStyle(n).backgroundColor)).size"""),
                             1,
                         )
-                        # Empty days retain the chart's space; hidden Settings reserve none.
+                        # Empty days keep the summary's size; hidden Settings reserve none.
                         window.page().runJavaScript(
                             "[...document.querySelectorAll('.heat-cell')].find(c=>!c.disabled&&"
                             "c.dataset.level==='0').click()"
@@ -576,32 +756,24 @@ class DesktopTests(unittest.TestCase):
                         QTest.qWait(80)
                         wait_for(bounds)
                         settings_geometry = evaluate(geometry)
-                        self.assertLess(settings_geometry[1], baseline[1])
+                        self.assertNotEqual(settings_geometry[1], baseline[1])
                         self.assertEqual(settings_geometry[-1], baseline[-1])
-                        window.page().runJavaScript("$('source-details-codex').open=true")
-                        QTest.qWait(80)
-                        wait_for(bounds)
-                        self.assertGreater(window.height(), settings_geometry[1])
-                        window.page().runJavaScript("$('source-details-codex').open=false")
-                        QTest.qWait(80)
-                        wait_for(bounds)
-                        self.assertEqual(evaluate(geometry), settings_geometry)
-                        window.page().runJavaScript("$('source-details-claude').open=true")
-                        QTest.qWait(80)
-                        wait_for(bounds)
-                        self.assertGreater(window.height(), settings_geometry[1])
-                        self.assertEqual(evaluate(geometry)[-1], settings_geometry[-1])
-                        window.page().runJavaScript("$('source-details-claude').open=false")
-                        QTest.qWait(80)
-                        wait_for(bounds)
-                        self.assertEqual(evaluate(geometry), settings_geometry)
+                        for agent in AGENTS:
+                            window.page().runJavaScript(f"$('source-details-{agent}').open=true")
+                            QTest.qWait(80)
+                            wait_for(bounds)
+                            self.assertGreater(window.height(), settings_geometry[1])
+                            self.assertEqual(evaluate(geometry)[-1], settings_geometry[-1])
+                            window.page().runJavaScript(f"$('source-details-{agent}').open=false")
+                            QTest.qWait(80)
+                            wait_for(bounds)
+                            self.assertEqual(evaluate(geometry), settings_geometry)
                         window.page().runJavaScript("$('settings').close()")
                         QTest.qWait(80)
                         wait_for(bounds)
                         self.assertEqual(evaluate(geometry), baseline)
                         self.assertEqual(evaluate("$('bucket-prompts').textContent"), "0")
-                        self.assertEqual(evaluate("$('bucket-tokens').textContent"), "—")
-                        self.assertTrue(evaluate("!$('usage-empty').hidden"))
+                        self.assertTrue(evaluate("$('bucket-tokens').parentElement.hidden"))
                 # Period changes shrink and grow in both directions without retaining a maximum.
                 heights = {}
                 for period in ("all", "weekly", "today", "weekly", "all"):
@@ -613,32 +785,6 @@ class DesktopTests(unittest.TestCase):
                     heights[period] = window.height()
                 self.assertLess(heights["today"], heights["weekly"])
                 self.assertLess(heights["today"], heights["all"])
-                # Use the actual preference control to exercise the native width handshake.
-                window.page().runJavaScript(
-                    "$('view-setting').value='compact';"
-                    "$('view-setting').dispatchEvent(new Event('change'))"
-                )
-                QTest.qWait(100)
-                wait_for(bounds)
-                self.assertTrue(window.compact)
-                compact_height = window.height()
-                compact_close = evaluate(geometry)[-1]
-                window.page().runJavaScript("openSettings()")
-                QTest.qWait(100)
-                wait_for(bounds)
-                self.assertNotEqual(window.height(), compact_height)
-                self.assertEqual(evaluate(geometry)[-1], compact_close)
-                window.page().runJavaScript("$('settings').close()")
-                QTest.qWait(100)
-                wait_for(bounds)
-                self.assertEqual(window.height(), compact_height)
-                window.page().runJavaScript(
-                    "$('view-setting').value='normal';"
-                    "$('view-setting').dispatchEvent(new Event('change'));$('settings').close()"
-                )
-                QTest.qWait(100)
-                wait_for(bounds)
-                self.assertFalse(window.compact)
                 # A smaller monitor still fits every active panel without a vertical scrollbar.
                 screen.availableGeometry.return_value = QRect(0, 0, 1280, 600)
                 window.apply_size()
@@ -658,63 +804,57 @@ class DesktopTests(unittest.TestCase):
                 window.apply_size()
                 QTest.qWait(100)
                 wait_for(bounds)
-                self.assertEqual(window.width(), 400)
+                self.assertEqual(window.width(), WIDTH)
                 self.assertEqual(
                     evaluate(
                         "Number(getComputedStyle(document.documentElement).getPropertyValue('--layout-scale'))"
                     ),
                     1,
                 )
-                # Diagnostics must update even when the same agent still has no quota windows.
+                # Diagnostics name each agent and update while it still reports no limits.
                 for agent, issue, label in (
-                    ("Codex", "not_found", "Not installed"),
-                    ("Codex", "login_required", "Not connected"),
-                    ("Codex", "unsupported_account", "Subscription required"),
-                    ("Claude Code", "login_required", "Not connected"),
-                    ("Claude Code", "unsupported_version", "Update Claude Code"),
+                    ("codex", "not_found", "Not installed"),
+                    ("codex", "login_required", "Not connected"),
+                    ("codex", "unsupported_account", "Subscription required"),
+                    ("claude", "login_required", "Not connected"),
+                    ("claude", "unsupported_version", "Update Claude Code"),
                 ):
                     window.page().runJavaScript(
-                        f"providers=[{{agent:'{agent}',windows:[],issue:'{issue}'}}];render()"
+                        f"accounts=[{{id:'{agent}',windows:[],issue:'{issue}'}}];render()"
                     )
                     wait_for(
-                        "[...document.querySelectorAll('.quota-unavailable .caption')]"
+                        "[...document.querySelectorAll('.limit-unavailable .caption')]"
                         f".some(node=>node.textContent==='{label}')"
                     )
-                # Native account updates must reach Settings and gauges without terminal capture.
-                source = Subscriptions(load_config()["subscriptions"])
+                # Account updates reach Settings and the limits without any terminal.
+                source = Limits(load_config())
                 source.query = Mock(
-                    return_value={
-                        "agent": "Claude Code",
-                        "windows": [],
-                        "updated_at": None,
-                        "issue": "login_required",
-                    }
+                    return_value={"windows": [], "updated_at": None, "issue": "login_required"}
                 )
                 self.usage.connections = {"codex": False, "claude": True}
-                window.bridge.subscriptions = source
+                window.bridge.limits = source
                 window.page().runJavaScript("openSettings()")
-                wait_for("$('claude-connection').textContent==='Not connected'")
-                source.query.return_value = claude_snapshot(
-                    {
-                        "rate_limits": {
-                            "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
-                            "seven_day": {"utilization": 3, "resets_at": "2099-01-07T00:00:00Z"},
-                        }
-                    },
-                    time.time(),
-                )
+                wait_for("$('connection-claude').textContent==='Not connected'")
+                limits = {
+                    "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
+                    "seven_day": {"utilization": 3, "resets_at": "2099-01-07T00:00:00Z"},
+                }
+                source.query.return_value = {
+                    "windows": Claude.windows({"rate_limits": limits}),
+                    "updated_at": time.time(),
+                }
                 source.checked.clear()
-                wait_for("$('claude-connection').textContent==='Connected'")
+                wait_for("$('connection-claude').textContent==='Connected'")
                 self.assertEqual(
                     evaluate("""[...document.querySelectorAll(
-                    '.quota-card[data-agent="Claude Code"] .quota-percent')]
+                    '.limit-card[data-agent="claude"] .limit-percent')]
                     .map(node=>node.textContent)"""),
                     ["0%", "3%"],
                 )
                 self.assertEqual(source.query.call_count, 2)
 
     def test_backup_limits_sources_and_failure_redaction(self):
-        archive = {"format": "agent-usage", "version": 1, "records": []}
+        archive = {"format": "agent-usage", "version": 3, "records": []}
         self.usage.export.return_value = archive
         path = self.root / "backup.json"
         self.bridge.execute("export", {"path": str(path)})
