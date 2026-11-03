@@ -55,9 +55,9 @@ try {
     assert(!reply.error && !reply.result.exceptionDetails, JSON.stringify(reply));
     return reply.result.result.value;
   }
-  await until(() => evaluate("typeof data!=='undefined' && data?.rows.length>1500 && subscriptionsLoaded && document.documentElement.dataset.demo==='true'"));
+  await until(() => evaluate("typeof data!=='undefined' && data?.rows.length>1500 && limitsLoaded && document.documentElement.dataset.demo==='true'"));
   await evaluate("document.fonts.ready.then(()=>true)");
-  assert.equal(await evaluate("providers.length"), 2);
+  assert.equal(await evaluate("accounts.length"), await evaluate("agents.size"));
   assert.equal(await evaluate("preferences.period"), 'all');
   const fits = `(()=>{const p=$('settings').open?$('settings'):document.querySelector('.widget'),r=p.getBoundingClientRect();return r.right<=innerWidth&&r.bottom<=innerHeight&&p.scrollHeight<=p.clientHeight+1})()`;
   for (const period of ['weekly', 'all']) {
@@ -67,20 +67,20 @@ try {
     await evaluate("[...document.querySelectorAll('.heat-cell')].find(c=>!c.disabled&&c.dataset.level==='0')?.click();true");
     await pause(100); assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
     await evaluate('openSettings().then(()=>true)'); await pause(100);
-    assert(await evaluate(fits)); assert(await evaluate('innerHeight') < size[1]);
+    assert(await evaluate(fits)); assert.notEqual(await evaluate('innerHeight'), size[1]);
     await evaluate("$('settings').close();true"); await pause(100);
     assert.deepEqual(await evaluate('[innerWidth,innerHeight]'), size);
   }
   const historyHeight = await evaluate("document.querySelector('.widget').offsetHeight");
   await evaluate("changePeriod('today');true"); await pause(150);
   assert(await evaluate(fits)); assert(await evaluate("document.querySelector('.widget').offsetHeight") < historyHeight);
-  for (const view of ['normal', 'compact']) {
-    await evaluate(`$('view-setting').value='${view}';$('view-setting').dispatchEvent(new Event('change'));changePeriod('all');true`);
+  for (const [name, script] of [['history', "changePeriod('all')"], ['day', "$('detail-toggle').click()"]]) {
+    await evaluate(`${script};true`);
     await pause(200); assert(await evaluate(fits));
     if (process.env.PREVIEW_DIR) {
       await mkdir(process.env.PREVIEW_DIR, { recursive: true });
       const reply = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
-      await writeFile(join(process.env.PREVIEW_DIR, view + '.png'), Buffer.from(reply.result.data, 'base64'));
+      await writeFile(join(process.env.PREVIEW_DIR, name + '.png'), Buffer.from(reply.result.data, 'base64'));
     }
   }
   await evaluate("setTimeout(()=>native('quit'),0);true");

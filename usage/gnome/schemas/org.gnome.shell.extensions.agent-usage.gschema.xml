@@ -4,5 +4,13 @@
       <default>(-1, -1)</default>
       <summary>Saved desktop position</summary>
     </key>
+    <key name="panel-limits" type="as">
+      <default>[]</default>
+      <summary>Limits shown in the top bar, by ID</summary>
+    </key>
+    <key name="panel-reset-time" type="b">
+      <default>true</default>
+      <summary>Show each top bar limit's reset time</summary>
+    </key>
   </schema>
 </schemalist>

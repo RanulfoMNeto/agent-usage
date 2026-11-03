@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en-US" data-theme="dark" data-style="minimal" data-view="normal">
+<html lang="en-US" data-theme="dark" data-style="minimal">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -17,26 +17,24 @@
     <div class="panel-content">
       <header id="window-handle" class="header" title="Drag to move">
         <h1>Usage</h1>
-        <div id="agents" class="agent-tabs" role="group" aria-label="Agent" hidden></div>
+        <div id="agents" class="agent-tabs segmented" role="group" aria-label="Agent" hidden></div>
         <div class="header-actions">
           <details id="connection-status" class="connection-status" hidden>
             <summary id="connection" class="connection"></summary>
             <p id="connection-info" class="status-info"></p>
           </details>
-          <button id="theme-toggle" class="icon-button" aria-label="Switch theme"><svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg><svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A8.5 8.5 0 0 1 8.5 4a8.5 8.5 0 1 0 11.5 11.5Z"/></svg></button>
           <button id="settings-open" class="icon-button" aria-label="Settings" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2.1-1.3.8-2.1-.5L3 9.6l1.5 1.6v1.6L3 14.4l2.5 4.2 2.1-.5 1.3.8.6 2.1h5l.6-2.1 1.3-.8 2.1.5 2.5-4.2-1.5-1.6v-1.6L21 9.6l-2.5-4.2-2.1.5-1.3-.8-.6-2.1z"/><circle cx="12" cy="12" r="3"/></svg></button>
-          <button id="widget-close" class="icon-button" aria-label="Quit widget" title="Quit widget"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+          <button id="widget-close" class="icon-button" aria-label="Quit" title="Quit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
       </header>
-      <section id="subscriptions-section" aria-label="Subscription limits" hidden>
-        <div id="subscriptions" class="subscriptions"></div>
+      <section id="limits-section" aria-label="Account limits" hidden>
+        <div id="limits" class="limits"></div>
       </section>
       <p id="dashboard-empty" class="empty" role="status">Loading…</p>
       <section id="activity" class="activity" aria-label="Recorded activity" hidden>
-        <p id="project-scope" class="caption project-scope" hidden></p>
         <div class="toolbar">
-          <p class="totals"><strong id="total-questions">—</strong> prompts <span>·</span> <strong id="total-tokens">—</strong> tokens</p>
-          <div class="select-field"><select id="period" aria-label="Activity period"><option value="today">Today</option><option value="weekly">Weekly</option><option value="all">History</option></select></div>
+          <div id="period" class="segmented" role="group" aria-label="Activity period"><button type="button" data-period="today">Today</button><button type="button" data-period="weekly">Weekly</button><button type="button" data-period="all">History</button></div>
+          <p id="totals" class="totals"><span><strong id="total-questions">—</strong> prompts</span><span><strong id="total-tokens">—</strong> tokens</span></p>
         </div>
         <div id="heatmaps" hidden></div>
         <template id="heatmap-template">
@@ -46,35 +44,32 @@
               <div class="heatmap-labels" aria-hidden="true"></div>
               <div class="heatmap-scroll">
                 <div class="heatmap-axis" aria-hidden="true"></div>
-                <div class="heatmap-grid" role="group" aria-label="Recorded tokens. Hover for totals; click for the day’s chart and totals. Use arrow keys to move between cells."></div>
+                <div class="heatmap-grid" role="group" aria-label="Recorded tokens per day. Use arrow keys to move between days."></div>
               </div>
             </div>
-            <div class="heatmap-footer"><span class="heatmap-range"></span><span class="heatmap-legend" title="Recorded tokens relative to the busiest cell in this view.">Less <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> More</span></div>
+            <p class="heatmap-range"></p>
           </section>
         </template>
-        <p id="chart-coverage" class="caption chart-coverage" hidden></p>
         <p id="weekly-empty" class="empty" hidden>Weekly reset unavailable.</p>
         <div id="detail-card" class="detail-card">
-          <div id="bucket-heading" class="summary-heading" hidden><h3 id="bucket-title"></h3><span class="caption">Day overview</span></div>
-          <div class="plot-heading"><h2 id="plot-title">Tokens per prompt</h2><span id="selection-key" class="selection-key">Selected</span></div>
-          <div id="line-chart" class="history-chart"><canvas id="usage-chart" role="img" aria-label="Tokens per prompt. The bright point is selected. Hover for a summary; click to select a prompt. Gaps indicate missing token data, not a running prompt."></canvas><p id="usage-empty" class="empty" hidden>No token data</p></div>
-          <p id="line-coverage" class="caption chart-coverage"></p>
-          <div id="bucket-inspector" hidden>
-            <dl id="bucket-detail" class="prompt-metrics">
-              <div><dt>Prompts</dt><dd id="bucket-prompts">—</dd></div>
-              <div><dt>Tokens</dt><dd id="bucket-tokens">—</dd><p id="bucket-token-coverage" class="metric-coverage" hidden></p></div>
-              <div><dt>Est. API cost</dt><dd id="bucket-cost">—</dd><p id="bucket-cost-coverage" class="metric-coverage" hidden></p></div>
-            </dl>
-            <p id="bucket-cost-note" class="caption cost-note">Not subscription billing</p>
-          </div>
-          <div id="prompt-inspector">
-            <div class="select-field"><select id="prompt" class="prompt-picker" aria-label="Selected prompt"></select></div>
-            <dl id="prompt-detail" class="prompt-metrics" hidden>
-              <div><dt id="cost-label" tabindex="0">Est. API cost</dt><dd id="prompt-cost">—</dd></div>
-              <div><dt>Tokens</dt><dd id="prompt-tokens">—</dd></div>
-              <div><dt>Duration</dt><dd id="prompt-duration">—</dd></div>
-            </dl>
-            <p id="cost-note" class="caption cost-note">Not subscription billing</p>
+          <button id="detail-toggle" class="detail-summary" type="button" aria-expanded="false" aria-controls="detail-body">
+            <span class="summary-text">
+              <span id="bucket-title" class="summary-title"></span>
+              <span class="summary-metrics"><span><strong id="bucket-prompts">—</strong> <span id="bucket-prompt-unit">prompts</span></span><span><strong id="bucket-tokens">—</strong> tokens</span><span><strong id="bucket-cost">—</strong> est.</span></span>
+            </span>
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div id="detail-body" class="detail-body" hidden>
+            <h2 id="plot-title">Tokens per prompt</h2>
+            <div id="line-chart" class="history-chart"><canvas id="usage-chart" role="img" aria-label="Tokens per prompt. Click a point to select its prompt."></canvas><p id="usage-empty" class="empty" hidden>No token data</p></div>
+            <div id="prompt-inspector">
+              <div class="select-field"><select id="prompt" class="prompt-picker" aria-label="Selected prompt"></select></div>
+              <dl id="prompt-detail" class="prompt-metrics" hidden>
+                <div><dt>Est. cost</dt><dd id="prompt-cost">—</dd></div>
+                <div><dt>Tokens</dt><dd id="prompt-tokens">—</dd></div>
+                <div><dt>Duration</dt><dd id="prompt-duration">—</dd></div>
+              </dl>
+            </div>
           </div>
         </div>
       </section>
@@ -83,14 +78,26 @@
   <div id="heatmap-tooltip" class="heatmap-tooltip" role="tooltip" hidden></div>
   <dialog id="settings" aria-labelledby="settings-title">
     <div class="panel-content">
-      <form method="dialog" class="dialog-header"><h2 id="settings-title">Settings</h2><button class="icon-button" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+      <form method="dialog" class="dialog-header">
+        <h2 id="settings-title">Settings</h2>
+        <div class="dialog-actions">
+          <button id="help-toggle" type="button" class="icon-button" aria-label="About the numbers" aria-expanded="false" aria-controls="help"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.6v.6M12 17v.1"/></svg></button>
+          <button id="settings-close" class="icon-button" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+        </div>
+      </form>
+      <ul id="help" class="help" hidden>
+        <li>Limits are reported by each agent's account and cover all of its usage.</li>
+        <li>Tokens are recorded input and output, including cached input. Missing measurements are left out.</li>
+        <li>Estimated cost uses standard API prices, not your subscription billing.</li>
+        <li>Weekly follows each agent's current reset window. Shades compare recorded tokens.</li>
+        <li>History stays on this computer. Conversation text is never stored.</li>
+      </ul>
       <div id="visible-limits" class="setting-row" hidden><span>Limits</span><div id="limit-options" class="limit-options" role="group" aria-label="Visible limits"></div></div>
       <div id="indicator-row" class="setting-row" hidden><label for="indicator-setting">Indicator</label><div class="select-field"><select id="indicator-setting"><option value="bar">Bar</option><option value="ring">Ring</option></select></div></div>
       <div id="limit-setting" class="setting-row" hidden><label for="limit-alert">Usage warning</label><div class="range-field"><input id="limit-alert" type="range" min="0" max="100" step="1" value="0"><output id="limit-value" for="limit-alert">Off</output></div></div>
-      <div class="setting-row"><label for="view-setting">View</label><div class="select-field"><select id="view-setting"><option value="normal">Normal</option><option value="compact" title="Subscription usage only">Compact</option></select></div></div>
+      <div class="setting-row"><label for="theme-setting">Theme</label><div class="select-field"><select id="theme-setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
       <div class="setting-row"><label for="style-setting">Style</label><div class="select-field"><select id="style-setting"><option value="minimal">Default</option><option value="glass">Glassmorphism</option><option value="brutalist">Neo-Brutalism</option><option value="neumorphic">Neumorphism</option><option value="swiss">Swiss Design</option></select></div></div>
       <div class="setting-row"><label for="pinned-setting">Keep on top</label><input id="pinned-setting" class="switch" type="checkbox" role="switch"></div>
-      <div class="project-setting"><div class="source-label"><label for="project">Project filter</label><button id="project-reset" class="text-button" hidden>Reset</button></div><button id="project" class="source-path" aria-label="Choose project directory" title="Filter activity by repository. Account limits apply to the whole account."><span>All projects</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg></button></div>
       <section id="agent-settings" class="agent-settings"><h2>Agents</h2></section>
       <div class="history-actions"><button id="export-history" class="setting-action" title="Export collected usage as JSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/></svg>Export</button><button id="import-history" class="setting-action" title="Merge a usage backup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M4 16v5h16v-5"/></svg>Import</button></div>
       <p id="settings-status" class="caption" role="status" hidden></p>

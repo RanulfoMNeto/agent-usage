@@ -40,7 +40,9 @@ jobs:
       - run: |
           node --check usage/static/assets/app.js
           node --check usage/gnome/extension.js
+          node --check usage/gnome/limits.js
           node --check tests/smoke.mjs
+          node --test tests/gnome.test.mjs
       - run: uv run pip-audit --local --skip-editable
       - run: uv build
       - name: Verify isolated wheel installation

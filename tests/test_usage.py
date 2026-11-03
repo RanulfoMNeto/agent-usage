@@ -1,14 +1,16 @@
 import copy
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from usage.history import Usage
-from usage.readers import estimate, project_path
+from usage.agents import AGENTS
+from usage.history import VERSION, Usage
+from usage.records import estimate
 
 
 def event(kind, second, **payload):
@@ -81,16 +83,16 @@ class HistoryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.config = dict(
             history=dict(database=str(self.root / "history.sqlite3")),
-            transcripts=dict(
-                codex=str(self.root / "codex"), claude=str(self.root / "claude"), show_question=True
-            ),
+            agents={agent: dict(history=str(self.root / agent)) for agent in AGENTS},
             collection=dict(refresh_seconds=1),
             prices={"model": dict(input=10, cached=1, write=12.5, output=50)},
         )
-        self.env = patch.dict(os.environ, {"CODEX_HOME": "", "CLAUDE_CONFIG_DIR": ""})
-        self.env.start()
-        self.addCleanup(self.env.stop)
         self.store = Usage(self.config)
+        self.addCleanup(self.store.close)
+
+    def calls(self, row, store=None):
+        records = (store or self.store).records()
+        return sum(1 for r in records if r["kind"] == "call" and r["turn"] == row["id"])
 
     def write(self, events, name="session.jsonl", agent="codex", append=False):
         path = self.root / agent / name
@@ -126,7 +128,7 @@ class HistoryTests(unittest.TestCase):
         self.store.sync()
         rows = self.store.snapshot()["rows"]
         self.assertEqual([r["tokens"] for r in rows], [230, 1100])
-        self.assertEqual([r["call_count"] for r in rows], [1, 1])
+        self.assertEqual([self.calls(r) for r in rows], [1, 1])
         self.assertEqual([r["title"] for r in rows], ["Second question", "First question"])
         self.assertFalse(rows[0]["duration_exact"])
         self.assertEqual(rows[0]["status"], "observed")
@@ -174,7 +176,7 @@ class HistoryTests(unittest.TestCase):
         rows = self.store.snapshot()["rows"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["tokens"], 1160)
-        self.assertEqual(rows[0]["call_count"], 2)
+        self.assertEqual(self.calls(rows[0]), 2)
 
     def test_fork_prefix_is_baseline_not_new_usage(self):
         meta = session("child", "parent")
@@ -214,7 +216,7 @@ class HistoryTests(unittest.TestCase):
         self.write(records)
         self.store.sync()
         row = self.store.snapshot()["rows"][0]
-        self.assertEqual((row["tokens"], row["call_count"]), (1100, 1))
+        self.assertEqual((row["tokens"], self.calls(row)), (1100, 1))
 
     def test_preliminary_counter_export_does_not_duplicate_later_response(self):
         self.write(self.basic()[:-1])
@@ -236,7 +238,7 @@ class HistoryTests(unittest.TestCase):
         self.write([native], append=True)
         self.store.sync()
         self.assertEqual(self.store.import_data(earlier)["imported"], 0)
-        self.assertEqual(self.store.snapshot()["rows"][0]["call_count"], 1)
+        self.assertEqual(self.calls(self.store.snapshot()["rows"][0]), 1)
 
     def test_claude_stream_duplicates_tool_results_and_late_parent(self):
         def entry(kind, second, uid, parent=None, **extra):
@@ -289,7 +291,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertIsNone(rows[0]["tokens"])
         self.assertEqual(rows[1]["tokens"], 280)
-        self.assertEqual(rows[1]["call_count"], 1)
+        self.assertEqual(self.calls(rows[1]), 1)
         self.assertFalse(rows[1]["duration_exact"])
         self.assertNotIn("SECRET TOOL RESULT", json.dumps(self.store.export()))
 
@@ -338,14 +340,15 @@ class HistoryTests(unittest.TestCase):
         with closing(target.connect()) as db:
             self.assertEqual(db.execute("PRAGMA quick_check").fetchone()[0], "ok")
 
-    def test_private_mode_and_malformed_records(self):
-        self.config["transcripts"]["show_question"] = False
-        path = self.write(self.basic())
+    def test_malformed_records_are_counted_without_storing_prompt_text(self):
+        records = self.basic()
+        records[3]["payload"]["message"] = "Summarize this. " + "PRIVATE BODY " * 40
+        path = self.write(records)
         with path.open("a") as stream:
             stream.write("{bad json}\n")
         self.store.sync()
-        self.assertIsNone(self.store.snapshot()["rows"][0]["title"])
-        self.assertNotIn("First question", json.dumps(self.store.export()))
+        self.assertLessEqual(len(self.store.snapshot()["rows"][0]["title"]), 80)
+        self.assertLess(json.dumps(self.store.export()).count("PRIVATE BODY"), 10)
         self.assertIn("1 unsupported", self.store.snapshot()["warnings"][0])
 
     def test_source_switch_persists_keeps_history_and_restores_discovery(self):
@@ -358,17 +361,21 @@ class HistoryTests(unittest.TestCase):
                 record["payload"]["turn_id"] = "another-turn"
         other = self.write(records, agent="other")
         values = {"codex": str(other.parent), "claude": ""}
+        result = self.store.set_sources(values)
+        self.assertEqual(result["codex"]["path"], str(other.parent))
+        self.assertEqual(list(self.store.paths()), [("codex", other)])
+        restarted = Usage(self.config)
+        self.addCleanup(restarted.close)
+        restarted.sync()
+        self.assertEqual(len(restarted.snapshot()["rows"]), 2)
+        self.assertEqual(restarted.sources()["codex"]["override"], str(other.parent))
+        restarted.set_sources({"codex": "", "claude": ""})
+        self.assertEqual(list(restarted.paths()), [("codex", original)])
+        self.assertEqual(len(restarted.snapshot()["rows"]), 2)
+        # Without configuration, each agent's own default location applies.
+        del self.config["agents"]
         with patch.dict(os.environ, {"CODEX_HOME": str(original.parent)}):
-            result = self.store.set_sources(values)
-            self.assertEqual(result["codex"]["path"], str(other.parent))
-            self.assertEqual(list(self.store.paths()), [("Codex", other)])
-            restarted = Usage(self.config)
-            restarted.sync()
-            self.assertEqual(len(restarted.snapshot()["rows"]), 2)
-            self.assertEqual(restarted.sources()["codex"]["override"], str(other.parent))
-            restarted.set_sources({"codex": "", "claude": ""})
-            self.assertEqual(list(restarted.paths()), [("Codex", original)])
-            self.assertEqual(len(restarted.snapshot()["rows"]), 2)
+            self.assertEqual(Usage(self.config).source_roots()["codex"], original.parent)
 
     def test_invalid_sources_are_rejected_without_changing_settings(self):
         before = self.store.sources()
@@ -384,29 +391,15 @@ class HistoryTests(unittest.TestCase):
                 self.store.set_sources(values)
             self.assertEqual(self.store.sources(), before)
 
-    def test_project_metadata_tracks_each_turn_and_portable_paths(self):
-        records = self.basic()
-        records[0]["payload"]["cwd"] = "/work/first"
-        records.insert(
-            3,
-            dict(
-                type="turn_context",
-                timestamp="2026-10-14T10:00:02Z",
-                payload=dict(cwd="/work/second/./src/..", model="model"),
-            ),
-        )
-        records += [
-            event("task_started", 5, turn_id="two"),
-            event("user_message", 6, message="Next"),
-        ]
-        self.write(records)
+    def test_earlier_archives_migrate_without_duplicates_and_still_import(self):
+        self.write(self.basic())
         self.write(
             [
                 dict(
                     type="user",
-                    sessionId="claude-project",
+                    sessionId="claude-session",
                     uuid="user-id",
-                    cwd="C:\\Work\\App",
+                    cwd="/work/app",
                     timestamp="2026-10-14T10:00:10Z",
                     message=dict(content="Question"),
                 )
@@ -414,49 +407,62 @@ class HistoryTests(unittest.TestCase):
             agent="claude",
         )
         self.store.sync()
-        rows = self.store.snapshot()["rows"]
-        self.assertEqual(
-            [row["project"] for row in rows], ["c:/work/app", "/work/second", "/work/second"]
-        )
-        self.assertEqual(self.store.snapshot()["source_counts"], {"codex": 1, "claude": 1})
-        for value in (None, 123, "relative/path", "C:relative", "/bad\x00path"):
-            self.assertIsNone(project_path(value))
-        self.assertEqual(project_path("\\\\SERVER\\Share\\Repo"), "//server/share/repo")
-
-    def test_project_backfill_preserves_archive_and_legacy_imports(self):
-        records = self.basic()
-        records[0]["payload"]["cwd"] = "/work/project"
-        self.write(records)
-        self.store.sync()
-        known = self.store.export()
-        legacy = copy.deepcopy(known)
-        legacy["version"] = 1
+        current = self.store.export()
+        self.assertEqual(current["version"], VERSION)
+        self.assertEqual({r["agent"] for r in current["records"]}, {"codex", "claude"})
+        self.assertEqual(self.store.snapshot()["source_counts"], {"claude": 1, "codex": 1})
+        # Version 2 named agents by namespace and kept project paths; version 1 had none.
+        legacy = copy.deepcopy(current)
+        legacy["version"] = 2
         for record in legacy["records"]:
+            record["agent"] = AGENTS[record["agent"]].namespace
+            if record["kind"] == "prompt":
+                record["project"] = "/work/app"
+        older = copy.deepcopy(legacy)
+        older["version"] = 1
+        for record in older["records"]:
             record.pop("project", None)
         with closing(self.store.connect()) as db, db:
-            db.execute("UPDATE records SET data=json_remove(data, '$.project') WHERE kind='prompt'")
-            db.execute("PRAGMA user_version=1")
-        migrated = Usage(self.config)
-        self.assertEqual(migrated.snapshot()["rows"][0]["tokens"], 1100)
-        self.assertIsNone(migrated.snapshot()["rows"][0]["project"])
-        migrated.sync()
-        self.assertEqual(migrated.export(), known)
-        migrated.import_data(legacy)
-        self.assertEqual(migrated.export(), known)
-        config = copy.deepcopy(self.config)
-        config["history"]["database"] = str(self.root / "legacy.sqlite3")
-        imported = Usage(config)
-        imported.import_data(legacy)
-        self.assertIsNone(imported.snapshot()["rows"][0]["project"])
-        imported.import_data(known)
-        self.assertEqual(imported.export(), known)
-        newer = copy.deepcopy(legacy)
-        for record in newer["records"]:
-            if record["kind"] == "prompt":
-                record["updated"] += 10
-        with closing(imported.connect()) as db, db:
             db.execute("DELETE FROM records")
-        imported.import_data(newer)
-        imported.sync()
-        self.assertEqual(imported.snapshot()["rows"][0]["project"], "/work/project")
-        self.assertEqual(imported.snapshot()["rows"][0]["tokens"], 1100)
+            for record in legacy["records"]:
+                db.execute(
+                    "INSERT INTO records VALUES (?, ?, ?, ?, ?)",
+                    (
+                        record["id"],
+                        record["kind"],
+                        record["updated"],
+                        record["counter"] if record["kind"] == "call" else None,
+                        json.dumps(record),
+                    ),
+                )
+            db.execute("PRAGMA user_version=2")
+        migrated = Usage(self.config)
+        self.addCleanup(migrated.close)
+        self.assertEqual(migrated.export(), current)
+        with closing(migrated.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM files").fetchone()[0], 0)
+        migrated.sync()
+        self.assertEqual(migrated.export(), current)
+        for archive in (legacy, older):
+            config = copy.deepcopy(self.config)
+            config["history"]["database"] = str(self.root / f"v{archive['version']}.sqlite3")
+            imported = Usage(config)
+            self.addCleanup(imported.close)
+            imported.import_data(archive)
+            self.assertEqual(imported.export(), current)
+        unknown = copy.deepcopy(current)
+        unknown["records"][0]["agent"] = "unknown"
+        with self.assertRaises(ValueError):
+            Usage(self.config).import_data(unknown)
+        # Settings of an agent that leaves the registry are ignored rather than fatal.
+        self.store.store("connections", {"retired": False, "codex": True})
+        self.store.store("sources", {"retired": "/old", "codex": str(self.root)})
+        reopened = Usage(self.config)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.connections, {"codex": True})
+        self.assertEqual(reopened.source_overrides, {"codex": str(self.root)})
+        newer = self.root / "newer.sqlite3"
+        with closing(sqlite3.connect(newer)) as db:
+            db.execute(f"PRAGMA user_version={VERSION + 1}")
+        with self.assertRaises(ValueError):
+            Usage(dict(self.config, history=dict(database=str(newer))))

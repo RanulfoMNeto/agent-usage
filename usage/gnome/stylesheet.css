@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: MIT */
+.agent-usage-panel { spacing: 10px; }
+.agent-usage-group { spacing: 4px; }
+.agent-usage-group .agent-usage-clock { margin-left: 4px; }
+.agent-usage-agent { font-weight: bold; }
+.agent-usage-limit { padding-top: 2px; padding-bottom: 2px; }
+.agent-usage-rows { spacing: 4px; }
+.agent-usage-value { font-weight: bold; font-feature-settings: "tnum"; }
+.agent-usage-track { width: 240px; height: 6px; border-radius: 3px; background-color: rgba(127, 127, 127, 0.3); }
+.agent-usage-fill { height: 6px; border-radius: 3px; }
+.agent-usage-warning { color: #f8e45c; }
+.agent-usage-critical { color: #ff7b63; }
