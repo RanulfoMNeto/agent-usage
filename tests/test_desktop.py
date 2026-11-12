@@ -5,6 +5,7 @@ import time
 import unittest
 from concurrent.futures import Future
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -638,6 +639,11 @@ class DesktopTests(unittest.TestCase):
                 self.assertTrue(published()["visible"])
                 window.bridge.request("1", "save_preferences", json.dumps({"limitAlert": 90}))
                 self.assertEqual(published()["warning"], 90)
+                window.bridge.request("hide", "hide", "null")
+                self.assertFalse(window.isVisible() or published()["visible"])
+                self.assertTrue(window.preferences.value("hidden", type=bool))
+                window.top_bar.command(pid, "toggle")
+                self.assertTrue(window.isVisible() and published()["visible"])
                 window.top_bar.command(pid, "toggle")
                 self.assertFalse(window.isVisible() or published()["visible"])
                 self.assertTrue(window.preferences.value("hidden", type=bool))
@@ -875,3 +881,101 @@ class DesktopTests(unittest.TestCase):
         with self.assertLogs(level="WARNING") as logs:
             self.bridge.finish("4", future)
         self.assertNotIn("PRIVATE", str(self.responses) + str(logs.output))
+
+    def test_window_scheduler_is_one_switch_and_an_editable_chart(self):
+        now = time.time()
+        today = datetime.fromtimestamp(now).date()
+        rows = []
+        for age in range(1, 36):
+            day = today - timedelta(days=age)
+            for minute in range(9 * 60, 17 * 60, 20) if day.weekday() < 5 else ():
+                moment = datetime(day.year, day.month, day.day, minute // 60, minute % 60)
+                rows.append(
+                    {
+                        "id": f"p{age}-{minute}",
+                        "agent": "claude",
+                        "start": moment.astimezone().timestamp(),
+                        "tokens": 30000,
+                    }
+                )
+        self.usage.snapshot.return_value = {"rows": rows, "warnings": []}
+        self.usage.connections = {"claude": True, "codex": True}
+        limits = reporting(
+            account("claude", [(10080, 25, now + 400000)], now),
+            account("codex", [(300, 10, now + 3600), (10080, 40, now + 400000)], now),
+        )
+        with self.renderer(limits) as (window, evaluate, wait_for):
+            run = window.page().runJavaScript
+            run("openSettings()")
+            wait_for("$('settings').open && !!scheduler?.agents?.claude")
+            self.assertEqual(evaluate("$('scheduler-summary-claude').textContent"), "Off")
+            for removed in ("mode", "guard", "sim", "history", "status"):
+                self.assertIsNone(evaluate(f"$('scheduler-{removed}-claude')"))
+            self.assertIsNone(evaluate("$('activate-claude') || $('simulate-claude')"))
+
+            run("$('scheduler-details-claude').open=true")
+            wait_for("!!charts['scheduler-claude']?.$scheduler")
+            self.assertTrue(
+                evaluate("""(()=>{
+                    const card=$('scheduler-details-claude').closest('.agent-card').getBoundingClientRect();
+                    const box=$('scheduler-chart-claude').getBoundingClientRect();
+                    return box.width>0 && box.left>=card.left && box.right<=card.right;
+                })()""")
+            )
+            self.assertEqual(
+                evaluate("$('scheduler-source-claude').textContent"), "Learned · drag to adjust"
+            )
+            self.assertTrue(evaluate("$('scheduler-reset-claude').hidden"))
+            learned = evaluate("scheduler.agents.claude.plan.starts")
+            self.assertEqual(len(learned), 1)
+            # Half-hour steps: the drawn use starts exactly at the first slot with prompts.
+            self.assertEqual(
+                evaluate("charts['scheduler-claude'].data.datasets[0].stepped"), "middle"
+            )
+            self.assertEqual(
+                evaluate("""(()=>{
+                    const act=scheduler.agents.claude.plan.activity, first=act.findIndex(v=>v>0.02);
+                    const points=charts['scheduler-claude'].data.datasets[0].data;
+                    return points.findIndex(p=>p.y>0.02)-1===first && points[first+1].x-0.25===first/2;
+                })()"""),
+                True,
+            )
+
+            # The switch alone turns it on, and the summary names the next start.
+            run("$('scheduler-enabled-claude').click()")
+            wait_for("scheduler.agents.claude.schedule.enabled===true")
+            self.assertEqual(evaluate("scheduler.agents.claude.status"), "scheduled")
+            self.assertRegex(
+                evaluate("$('scheduler-summary-claude').textContent"),
+                r"^(Next|Tomorrow|[A-Z][a-z]{2}) \d\d:\d\d$",
+            )
+
+            # Press the chart to add a start, drag it, click it to remove it.
+            run("""window.pointer = (type, hour) => {
+                const chart = charts['scheduler-claude'], canvas = chart.canvas;
+                const rect = canvas.getBoundingClientRect(), ratio = rect.width / canvas.offsetWidth;
+                canvas.dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, pointerId: 1, button: 0, buttons: type === 'pointerup' ? 0 : 1,
+                    clientX: rect.left + chart.scales.x.getPixelForValue(hour) * ratio,
+                    clientY: rect.top + 30,
+                }));
+            }""")
+            run("pointer('pointerdown', 15); pointer('pointerup', 15)")
+            wait_for(
+                "JSON.stringify(scheduler.agents.claude.schedule.times)==="
+                + json.dumps(json.dumps(sorted([*learned, "15:00"]), separators=(",", ":")))
+            )
+            self.assertEqual(evaluate("$('scheduler-source-claude').textContent"), "Your times")
+            self.assertFalse(evaluate("$('scheduler-reset-claude').hidden"))
+            run("pointer('pointerdown', 15); pointer('pointermove', 16); pointer('pointerup', 16)")
+            wait_for("scheduler.agents.claude.schedule.times.includes('16:00')")
+            self.assertNotIn("15:00", evaluate("scheduler.agents.claude.schedule.times"))
+            run("pointer('pointerdown', 16); pointer('pointerup', 16)")
+            wait_for("scheduler.agents.claude.schedule.times?.length===1")
+            run("$('scheduler-reset-claude').click()")
+            wait_for("scheduler.agents.claude.schedule.times===null")
+            self.assertTrue(evaluate("scheduler.agents.claude.schedule.enabled"))
+
+            run("$('settings').close()")
+            wait_for("!$('settings').open")
+            self.assertEqual(evaluate("document.querySelectorAll('.limit-scheduler').length"), 0)

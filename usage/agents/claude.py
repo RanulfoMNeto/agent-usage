@@ -164,6 +164,101 @@ class Claude(Agent):
             finally:
                 await stop(process)
 
+    async def activate_window(self, command, timeout):
+        """Start a 5-hour window with a minimal turn if no short window is active."""
+        with tempfile.TemporaryDirectory(prefix="agent-usage-") as directory:
+            process = await start(
+                command,
+                "--safe-mode",
+                "--print",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--no-session-persistence",
+                "--permission-mode",
+                "dontAsk",
+                "--tools",
+                "",
+                cwd=directory,
+            )
+
+            async def send(message):
+                process.stdin.write((json.dumps(message) + "\n").encode())
+                await process.stdin.drain()
+
+            async def receive():
+                line = await process.stdout.readline()
+                if not line:
+                    return None
+                message = json.loads(line)
+                if message.get("type") == "control_request":
+                    raise RuntimeError("Unexpected native permission request")
+                return message
+
+            async def request(request_id, kind, **params):
+                await send(
+                    dict(
+                        type="control_request",
+                        request_id=request_id,
+                        request=dict(subtype=kind, **params),
+                    )
+                )
+                while True:
+                    message = await receive()
+                    if message is None:
+                        raise AgentUnavailable("unsupported_version")
+                    response = message.get("response") or {}
+                    if (
+                        message.get("type") == "control_response"
+                        and response.get("request_id") == request_id
+                    ):
+                        if response.get("subtype") != "success":
+                            if "Unsupported control request" in str(response.get("error")):
+                                raise AgentUnavailable("unsupported_version")
+                            raise RuntimeError("Native account query failed")
+                        return response["response"]
+
+            try:
+                async with asyncio.timeout(timeout):
+                    initialized = await request("initialize", "initialize")
+                    if (initialized.get("account") or {}).get("tokenSource") == "none":
+                        raise AgentUnavailable("login_required")
+                    payload = await request("get_usage", "get_usage", skip_behaviors=True)
+                    if payload.get("rate_limits_available") is not True:
+                        raise AgentUnavailable("unsupported_account")
+                    windows = self.windows(payload)
+                    if any(w["used_percent"] >= 100 for w in windows):
+                        return dict(activated=False, reason="weekly_exhausted", windows=windows)
+                    if any(w["minutes"] < 10080 and w["used_percent"] > 0 for w in windows):
+                        return dict(activated=False, reason="already_active", windows=windows)
+                    await send(dict(type="user", message=dict(role="user", content=".")))
+                    turned = False
+                    while True:
+                        message = await receive()
+                        if message is None:
+                            if not turned:
+                                raise RuntimeError("Native activation failed")
+                            break
+                        if message.get("type") == "assistant":
+                            if message.get("isApiErrorMessage"):
+                                raise RuntimeError("Native activation failed")
+                            turned = True
+                        elif message.get("type") == "result":
+                            if message.get("is_error"):
+                                raise RuntimeError("Native activation failed")
+                            turned = True
+                            break
+                    try:
+                        after = await request("get_usage_after", "get_usage", skip_behaviors=True)
+                        windows = self.windows(after) or windows
+                    except (AgentUnavailable, RuntimeError, OSError):
+                        pass
+                    return dict(activated=True, reason="activated", windows=windows)
+            finally:
+                await stop(process)
+
     def demo_session(self, session, title, start, seconds, tokens):
         return [
             dict(

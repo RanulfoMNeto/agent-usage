@@ -17,7 +17,7 @@ const charts = {};
 // Agent metadata comes from the backend registry; nothing here names a specific agent.
 const agents = new Map();
 let chartSignature = '', activitySignature = '', limitSignature = '', heatmapSignature = '';
-let data = null, accounts = [], failed = false, limitsLoaded = false, topBar = false;
+let data = null, accounts = [], scheduler = null, failed = false, limitsLoaded = false, topBar = false;
 let buckets = new Map(), bucketId = null, agentFilter = 'all', promptId = null;
 const feeds = { usage: { seconds: 1 }, limits: { seconds: 1 } };
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
@@ -530,8 +530,254 @@ function renderConnections() {
   }
 }
 
+// Window scheduler: one switch, and the learned day as a chart whose start markers can be edited.
+const SLOT_MINUTES = 30, LIKELY = 0.4, SNAP_MINUTES = 15;
+const PAUSED = { disconnected: 'Agent disconnected', weekly_limit: 'Weekly limit reached', unavailable: 'Limits unavailable' };
+const TRUST_LABELS = { weekly: 'weekly rhythm', routine: 'usual routine', recent: 'recent days' };
+const scheduleEdits = new Map();
+let scheduleRevision = 0;
+
+function clockText(minutes) {
+  const value = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return String(Math.floor(value / 60)).padStart(2, '0') + ':' + String(value % 60).padStart(2, '0');
+}
+
+function clockMinutes(text) {
+  const [hours, minutes] = String(text).split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+function translucent(tone, alpha) {
+  const hex = tone.replace('#', ''), full = hex.length === 3 ? [...hex].map(c => c + c).join('') : hex;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return tone;
+  return 'rgba(' + [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16)).join(', ') + ', ' + alpha + ')';
+}
+
+function schedulerStatus(entry) {
+  const status = entry?.status || 'off';
+  if (status === 'scheduled' && valid(entry.next_activation_at)) {
+    const when = new Date(entry.next_activation_at * 1000);
+    const days = Math.round((new Date(when).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+    const time = clockText(when.getHours() * 60 + when.getMinutes());
+    const label = days <= 0 ? 'Next ' + time : days === 1 ? 'Tomorrow ' + time : when.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + time;
+    return [label, 'Next window start'];
+  }
+  return {
+    paused: ['Paused', PAUSED[entry?.reason] || ''],
+    learning: ['Learning', 'Needs a few days of history'],
+    idle: ['Not needed', 'No start is expected to help in the coming days'],
+  }[status] || ['Off', ''];
+}
+
+// Windows on the shown day: planned starts first, then natural starts where use is likely.
+function schedulerWindows(starts, activity, span) {
+  const events = [
+    ...starts.map(minutes => [minutes, 0]),
+    ...activity.flatMap((value, slot) => value >= LIKELY ? [[slot * SLOT_MINUTES, 1]] : []),
+  ].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const windows = [];
+  let end = -1;
+  for (const [minutes, natural] of events) {
+    if (minutes < end) continue;
+    end = minutes + span; windows.push({ start: minutes, end, planned: !natural });
+  }
+  return windows;
+}
+
+function schedulerStarts(id) {
+  return scheduleEdits.get(id)?.starts || (scheduler?.agents?.[id]?.plan?.starts || []).map(clockMinutes);
+}
+
+const schedulerOverlay = {
+  id: 'schedulerOverlay',
+  beforeDatasetsDraw(chart) {
+    const overlay = chart.$scheduler; if (!overlay) return;
+    const { ctx, chartArea: area, scales: { x } } = chart;
+    ctx.save();
+    overlay.windows.forEach((item, index) => {
+      const left = x.getPixelForValue(item.start / 60), right = x.getPixelForValue(Math.min(item.end, 1440) / 60);
+      ctx.fillStyle = translucent(overlay.band, index % 2 ? 0.05 : 0.1);
+      ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
+    });
+    ctx.restore();
+  },
+  afterDatasetsDraw(chart) {
+    const overlay = chart.$scheduler; if (!overlay) return;
+    const { ctx, chartArea: area, scales: { x } } = chart;
+    ctx.save();
+    // Resets: where a window ends inside the day and a fresh quota begins.
+    ctx.strokeStyle = overlay.muted; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
+    for (const item of overlay.windows) {
+      if (item.end >= 1440) continue;
+      const px = Math.round(x.getPixelForValue(item.end / 60)) + .5;
+      ctx.beginPath(); ctx.moveTo(px, area.top); ctx.lineTo(px, area.bottom); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (overlay.now !== null) {
+      const px = x.getPixelForValue(overlay.now / 60);
+      ctx.fillStyle = overlay.muted;
+      ctx.beginPath(); ctx.moveTo(px, area.bottom - 5); ctx.lineTo(px - 3.5, area.bottom + 1); ctx.lineTo(px + 3.5, area.bottom + 1); ctx.fill();
+    }
+    ctx.font = '600 8px ' + Chart.defaults.font.family; ctx.textBaseline = 'middle';
+    overlay.starts.forEach((minutes, index) => {
+      const px = x.getPixelForValue(minutes / 60), top = area.top - 6;
+      ctx.strokeStyle = overlay.marker; ctx.lineWidth = overlay.active === index ? 2 : 1.5;
+      ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, area.bottom); ctx.stroke();
+      ctx.fillStyle = overlay.marker; ctx.strokeStyle = overlay.surface; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, top, overlay.active === index ? 5.5 : 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      const label = clockText(minutes), width = ctx.measureText(label).width;
+      const right = px + 8 + width <= chart.width;
+      ctx.fillStyle = overlay.text; ctx.textAlign = right ? 'left' : 'right';
+      ctx.fillText(label, right ? px + 8 : px - 8, top);
+    });
+    ctx.restore();
+  },
+};
+
+function renderSchedulerChart(id) {
+  const entry = scheduler?.agents?.[id], canvas = $('scheduler-chart-' + id), details = $('scheduler-details-' + id);
+  if (!entry?.plan || !canvas || !$('settings').open || !details?.open || typeof Chart === 'undefined') return;
+  const plan = entry.plan, span = entry.window_minutes || 300, edit = scheduleEdits.get(id);
+  const activity = plan.activity?.length === 1440 / SLOT_MINUTES ? plan.activity : Array(1440 / SLOT_MINUTES).fill(0);
+  const starts = schedulerStarts(id), enabled = entry.schedule?.enabled === true, tone = agentColor(id);
+  const minute = new Date().getHours() * 60 + new Date().getMinutes();
+  const overlay = {
+    starts, windows: schedulerWindows(starts, activity, span), now: plan.today ? minute : null,
+    active: edit?.index ?? -1, band: color('text'), marker: enabled ? tone : color('muted'),
+    muted: color('muted'), text: color('text'), surface: color('panel') || color('surface'),
+  };
+  canvas.setAttribute('aria-label', agentName(id) + ' usage by hour' + (starts.length ? '; window starts at ' + starts.map(clockText).join(', ') : '; no window starts'));
+  const key = 'scheduler-' + id;
+  const signature = JSON.stringify([activity, overlay, document.documentElement.dataset.theme, preferences.style]);
+  if (charts[key] && canvas.dataset.signature === signature) return;
+  canvas.dataset.signature = signature;
+  // One step per half hour: points sit at slot centers and steps change halfway between them,
+  // so each value covers exactly its slot and the curve starts where use starts.
+  const points = activity.map((value, slot) => ({ x: (slot + .5) * SLOT_MINUTES / 60, y: value }));
+  const data = [{ x: 0, y: activity[0] }, ...points, { x: 24, y: activity[activity.length - 1] }];
+  const datasets = [{
+    data, borderColor: tone, backgroundColor: translucent(tone, .22), fill: 'origin', borderWidth: Number(color('chart-width')) * .75,
+    stepped: 'middle', pointRadius: 0, pointHoverRadius: 3, pointHitRadius: 6, pointBackgroundColor: tone, clip: false,
+  }];
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  const options = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    layout: { padding: { left: 4, right: 8, top: 14 } },
+    events: ['mousemove', 'mouseout'],
+    interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        enabled: !edit, displayColors: false, backgroundColor: color('surface'), titleColor: color('muted'), bodyColor: color('text'),
+        titleFont: { size: 9, weight: 'normal' }, bodyFont: { size: 11, weight: '600' },
+        padding: 10, cornerRadius: Number(color('tooltip-radius')), caretSize: 3, caretPadding: 6, borderWidth: 0,
+        filter: item => item.dataIndex > 0 && item.dataIndex <= activity.length,
+        callbacks: {
+          title: items => { const slot = items[0].dataIndex - 1; return clockText(slot * SLOT_MINUTES) + '–' + clockText((slot + 1) * SLOT_MINUTES); },
+          label: item => Math.round(item.parsed.y * 100) + '% likely in use',
+        },
+      },
+    },
+    scales: {
+      x: { type: 'linear', min: 0, max: 24, grid: { display: false }, border: { display: false },
+        ticks: { stepSize: 6, maxRotation: 0, color: color('muted'), font: { size: 8 }, callback: value => clockText(value * 60) } },
+      y: { min: 0, max: 1, display: false },
+    },
+  };
+  if (charts[key]) {
+    charts[key].$scheduler = overlay; charts[key].data = { datasets }; charts[key].options = options; charts[key].update('none');
+  } else {
+    charts[key] = new Chart(canvas, { type: 'line', data: { datasets }, options, plugins: [schedulerOverlay] });
+    charts[key].$scheduler = overlay; charts[key].draw();
+  }
+}
+
+function renderScheduler() {
+  for (const id of agents.keys()) {
+    const entry = scheduler?.agents?.[id], badge = $('scheduler-summary-' + id);
+    if (!badge) continue;
+    const [label, title] = schedulerStatus(entry);
+    const failed = entry?.status === 'scheduled' && entry.last_event?.status === 'failed';
+    badge.textContent = label; badge.title = failed ? 'The last start failed; it will be retried' : title;
+    badge.dataset.state = failed ? 'failed' : entry?.status || 'off';
+    $('scheduler-enabled-' + id).checked = entry?.schedule?.enabled === true;
+    const custom = Array.isArray(entry?.schedule?.times);
+    $('scheduler-reset-' + id).hidden = !custom;
+    const source = $('scheduler-source-' + id), model = entry?.model;
+    source.textContent = custom ? 'Your times' : model?.ready ? 'Learned · drag to adjust' : 'Learning your pattern';
+    const lead = model?.trust && Object.entries(model.trust).sort((a, b) => b[1] - a[1])[0];
+    source.title = !custom && model?.ready && lead
+      ? count(model.active_days) + ' active days · currently follows your ' + TRUST_LABELS[lead[0]] + ' (' + Math.round(lead[1] * 100) + '%)'
+      : '';
+    renderSchedulerChart(id);
+  }
+}
+
+async function saveSchedule(id, patch) {
+  const current = scheduler?.agents?.[id]?.schedule || { enabled: false, times: null };
+  scheduleRevision++; settingsMessage();
+  try {
+    const next = await native('save_schedule', { agent: id, schedule: { enabled: current.enabled === true, times: current.times ?? null, ...patch } });
+    if (next?.agents) scheduler = next;
+  } catch (error) { settingsMessage(error.message); }
+  finally { scheduleRevision++; scheduleEdits.delete(id); renderScheduler(); reportSize(); }
+}
+
+// Press the chart to add a start, drag a marker to move it, click a marker to remove it.
+function attachSchedulerChart(id, canvas) {
+  const locate = event => {
+    const chart = charts['scheduler-' + id], rect = canvas.getBoundingClientRect();
+    const px = (event.clientX - rect.left) * (canvas.offsetWidth / rect.width || 1);
+    return { chart, px, minutes: chart.scales.x.getValueForPixel(px) * 60 };
+  };
+  const snap = minutes => Math.min(1440 - SNAP_MINUTES, Math.max(0, Math.round(minutes / SNAP_MINUTES) * SNAP_MINUTES));
+  canvas.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !charts['scheduler-' + id] || scheduleEdits.has(id)) return;
+    const { chart, px, minutes } = locate(event), span = scheduler?.agents?.[id]?.window_minutes || 300;
+    if (px < chart.chartArea.left - 8 || px > chart.chartArea.right + 8) return;
+    const starts = schedulerStarts(id).slice();
+    let index = starts.findIndex(value => Math.abs(chart.scales.x.getPixelForValue(value / 60) - px) <= 8);
+    const created = index < 0;
+    if (created) {
+      const value = snap(minutes);
+      if (starts.some(other => Math.abs(other - value) < span)) return;
+      starts.push(value); starts.sort((a, b) => a - b); index = starts.indexOf(value);
+    }
+    scheduleEdits.set(id, { starts, index, created, moved: false, origin: event.clientX });
+    try { canvas.setPointerCapture(event.pointerId); } catch { /* synthetic pointers cannot be captured */ }
+    event.preventDefault();
+    renderSchedulerChart(id);
+  });
+  canvas.addEventListener('pointermove', event => {
+    const edit = scheduleEdits.get(id);
+    if (!edit || edit.index < 0) return;
+    if (!edit.moved && Math.abs(event.clientX - edit.origin) < 4) return;
+    edit.moved = true;
+    const span = scheduler?.agents?.[id]?.window_minutes || 300;
+    const low = edit.index > 0 ? edit.starts[edit.index - 1] + span : 0;
+    const high = edit.index < edit.starts.length - 1 ? edit.starts[edit.index + 1] - span : 1440 - SNAP_MINUTES;
+    if (low <= high) edit.starts[edit.index] = Math.min(high, Math.max(low, snap(locate(event).minutes)));
+    renderSchedulerChart(id);
+  });
+  canvas.addEventListener('pointerup', event => {
+    const edit = scheduleEdits.get(id);
+    if (!edit || edit.index < 0) return;
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    const starts = !edit.moved && !edit.created ? edit.starts.filter((_, i) => i !== edit.index) : edit.starts;
+    edit.starts = starts; edit.index = -1;
+    // Without any start of your own, the scheduler goes back to learned times.
+    saveSchedule(id, { times: starts.length ? starts.map(clockText) : null });
+  });
+  canvas.addEventListener('pointercancel', () => {
+    if (scheduleEdits.get(id)?.index >= 0) { scheduleEdits.delete(id); renderSchedulerChart(id); }
+  });
+}
+
 function buildAgentSettings() {
   const section = $('agent-settings');
+  for (const key of Object.keys(charts)) {
+    if (key.startsWith('scheduler-')) { charts[key].destroy(); delete charts[key]; }
+  }
   section.querySelectorAll('.agent-card').forEach(card => card.remove());
   for (const id of agents.keys()) {
     const card = el('article', undefined, 'agent-card');
@@ -548,7 +794,23 @@ function buildAgentSettings() {
     folder.setAttribute('aria-label', 'Choose ' + agentName(id) + ' history directory');
     folder.innerHTML = '<span>Loading…</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v13H3z"/></svg>';
     const empty = el('p', 'No session files found', 'caption source-empty'); empty.id = 'source-empty-' + id; empty.hidden = true;
-    source.append(el('summary', 'History folder'), reset, folder, empty); card.append(header, source); section.append(card);
+    source.append(el('summary', 'History folder'), reset, folder, empty);
+    const sched = el('details', undefined, 'agent-scheduler'); sched.id = 'scheduler-details-' + id;
+    sched.addEventListener('toggle', () => { renderScheduler(); reportSize(); });
+    const schedSummary = el('summary'), schedBadge = el('span', 'Off', 'scheduler-summary'); schedBadge.id = 'scheduler-summary-' + id;
+    schedSummary.append(el('span', 'Window scheduler'), schedBadge);
+    const schedBody = el('div', undefined, 'scheduler-body');
+    const toggleRow = el('label', undefined, 'scheduler-toggle'), toggle = el('input', undefined, 'switch');
+    toggle.type = 'checkbox'; toggle.id = 'scheduler-enabled-' + id; toggle.dataset.schedulerEnabled = id; toggle.setAttribute('role', 'switch');
+    toggleRow.append(el('span', 'Start windows automatically'), toggle);
+    const chartWrap = el('div', undefined, 'scheduler-chart'), canvas = el('canvas'); canvas.id = 'scheduler-chart-' + id; canvas.setAttribute('role', 'img');
+    chartWrap.append(canvas); attachSchedulerChart(id, canvas);
+    const foot = el('p', undefined, 'scheduler-foot caption'), origin = el('span'); origin.id = 'scheduler-source-' + id;
+    const learned = el('button', 'Use learned times', 'text-button'); learned.type = 'button'; learned.id = 'scheduler-reset-' + id; learned.dataset.schedulerReset = id; learned.hidden = true;
+    foot.append(origin, learned);
+    schedBody.append(toggleRow, chartWrap, foot);
+    sched.append(schedSummary, schedBody);
+    card.append(header, source, sched); section.append(card);
   }
 }
 
@@ -576,13 +838,21 @@ $('agent-settings').addEventListener('click', async event => {
     return;
   }
   const name = button.dataset.source || button.dataset.default;
-  if (!name) return;
-  button.disabled = true; settingsMessage();
-  try {
-    const result = await native(button.dataset.source ? 'choose_directory' : 'reset_source', name);
-    if (!result.cancelled) showSources(result);
-  } catch (error) { settingsMessage(error.message); }
-  finally { button.disabled = false; }
+  if (name) {
+    button.disabled = true; settingsMessage();
+    try {
+      const result = await native(button.dataset.source ? 'choose_directory' : 'reset_source', name);
+      if (!result.cancelled) showSources(result);
+    } catch (error) { settingsMessage(error.message); }
+    finally { button.disabled = false; }
+    return;
+  }
+  if (button.dataset.schedulerReset) await saveSchedule(button.dataset.schedulerReset, { times: null });
+});
+
+$('agent-settings').addEventListener('change', event => {
+  const id = event.target.dataset.schedulerEnabled;
+  if (id) saveSchedule(id, { enabled: event.target.checked });
 });
 
 function renderLimits() {
@@ -612,7 +882,7 @@ function renderLimits() {
 }
 
 function render() {
-  updateAgents(); renderLimits(); renderConnections(); renderActivity();
+  updateAgents(); renderLimits(); renderConnections(); renderScheduler(); renderActivity();
   for (const id of agents.keys()) {
     $('source-empty-' + id).hidden = data?.source_counts?.[id] !== 0 || accounts.some(account => account.id === id && account.issue === 'disconnected');
   }
@@ -627,13 +897,16 @@ async function refresh(name) {
   const feed = feeds[name];
   if (feed.busy || document.hidden) return;
   feed.busy = true;
-  const revision = connectionRevision;
+  const revision = connectionRevision, scheduled = scheduleRevision;
   try {
     const next = await native(name);
     if (!Array.isArray(next[name === 'usage' ? 'rows' : 'agents'])) throw Error('Unavailable');
     feed.seconds = next.refresh_seconds || feed.seconds;
     if (name === 'usage') { data = next; failed = false; }
-    else if (revision === connectionRevision && !connectionTask) { accounts = next.agents; topBar = next.top_bar === true; limitsLoaded = true; }
+    else if (revision === connectionRevision && !connectionTask) {
+      accounts = next.agents; topBar = next.top_bar === true; limitsLoaded = true;
+      if (next.scheduler && scheduled === scheduleRevision && !scheduleEdits.size) scheduler = next.scheduler;
+    }
   } catch {
     if (name === 'usage') failed = true;
     else if (revision === connectionRevision && !connectionTask) { accounts = []; limitsLoaded = true; }
@@ -654,7 +927,12 @@ async function openSettings() {
   for (const key of ['theme', 'style', 'indicator']) $(key + '-setting').value = preferences[key];
   $('pinned-setting').checked = preferences.pinned;
   $('settings').showModal(); reportSize();
-  try { showSources(await native('sources')); } catch (error) { settingsMessage(error.message); }
+  try {
+    const scheduled = scheduleRevision;
+    const [sources, sched] = await Promise.all([native('sources'), native('scheduler')]);
+    if (sched?.agents && scheduled === scheduleRevision && !scheduleEdits.size) scheduler = sched;
+    showSources(sources); renderScheduler(); reportSize();
+  } catch (error) { settingsMessage(error.message); }
 }
 
 function updateWarningControl() {
@@ -698,11 +976,13 @@ $('help-toggle').addEventListener('click', () => {
   $('help').hidden = !$('help').hidden;
   $('help-toggle').setAttribute('aria-expanded', String(!$('help').hidden));
 });
-$('window-handle').addEventListener('pointerdown', event => {
-  if (event.button !== 0 || event.target.closest('button, details, select, input, a')) return;
-  event.preventDefault(); native('move').catch(error => settingsMessage(error.message));
-});
-$('widget-close').addEventListener('click', () => native('quit'));
+for (const handle of document.querySelectorAll('#window-handle, .dialog-header')) {
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button, details, select, input, a')) return;
+    event.preventDefault(); native('move').catch(error => settingsMessage(error.message));
+  });
+}
+$('widget-close').addEventListener('click', () => native('hide'));
 $('prompt').addEventListener('change', () => { promptId = $('prompt').value || null; renderActivity(); });
 $('heatmaps').addEventListener('mouseover', event => showHeatmapTooltip(event.target.closest('.heat-cell')));
 $('heatmaps').addEventListener('focusin', event => showHeatmapTooltip(event.target.closest('.heat-cell')));

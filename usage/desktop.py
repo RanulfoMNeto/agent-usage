@@ -48,6 +48,7 @@ from .integration import (
     terminal_command,
 )
 from .limits import Limits
+from .scheduler import Scheduler
 
 STATIC = Path(__file__).with_name("static").resolve()
 # Account queries keep their own cache; this only bounds how soon the top bar follows.
@@ -75,10 +76,11 @@ class Bridge(QObject):
     layout_changed = Signal(int, float)
     login_url = Signal(str, str)
 
-    def __init__(self, usage, limits, settings, window, agents=AGENTS):
+    def __init__(self, usage, limits, settings, window, agents=AGENTS, scheduler=None):
         super().__init__(window)
         self.usage, self.limits, self.settings, self.window = usage, limits, settings, window
         self.agents = agents
+        self.scheduler = scheduler or Scheduler(usage, limits, agents=agents)
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-usage")
         self.terminal = None
         self.login_url.connect(self.open_login)
@@ -204,6 +206,11 @@ class Bridge(QObject):
                     self.respond(identifier, {"cancelled": True})
                     return
                 args = {"agent": args, "path": path}
+            if method == "hide":
+                self.settings.setValue("hidden", True)
+                self.window.hide()
+                self.respond(identifier, {})
+                return
             if method == "quit":
                 QApplication.instance().quit()
                 return
@@ -230,11 +237,29 @@ class Bridge(QObject):
             return dict(self.usage.snapshot(), refresh_seconds=refresh)
         if method == "limits":
             # Rendering follows collection cadence; account queries keep their own cache.
+            self.scheduler.limits = self.limits
+            snap = self.limits.snapshot(self.usage.connections)
+            try:
+                scheduled = self.scheduler.snapshot(limits_snapshot=snap)
+            except Exception as exc:
+                # The scheduler never blocks limits from rendering.
+                logging.warning("Scheduler snapshot failed (%s)", type(exc).__name__)
+                scheduled = None
             return dict(
-                self.limits.snapshot(self.usage.connections),
+                snap,
                 refresh_seconds=refresh,
                 top_bar=getattr(getattr(self.window, "top_bar", None), "attached", False),
+                scheduler=scheduled,
             )
+        if method == "scheduler":
+            self.scheduler.limits = self.limits
+            return self.scheduler.snapshot()
+        if method == "save_schedule":
+            if not isinstance(args, dict):
+                raise ValueError("Invalid schedule request")
+            agent = self.agent(args.get("agent"))
+            self.scheduler.limits = self.limits
+            return self.scheduler.set_schedule(agent.id, args.get("schedule"))
         if method == "sources":
             return self.usage.sources()
         if method in ("choose_directory", "reset_source"):
@@ -261,6 +286,7 @@ class Bridge(QObject):
         raise ValueError("Unknown operation")
 
     def close(self):
+        self.scheduler.close()
         if hasattr(self.limits, "cancel_login"):
             self.limits.cancel_login(close=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
@@ -495,7 +521,7 @@ def run(config, *, limits=None):
     app.setApplicationName("Agent Usage")
     app.setDesktopFileName("agent-usage")
     app.setOrganizationName("AgentUsage")
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     state = user_directory("state")
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = QLockFile(str(state / "widget.lock"))
@@ -506,6 +532,7 @@ def run(config, *, limits=None):
     usage = Usage(config)
     widget = Widget(config["widget"], usage, limits or Limits(config))
     usage.start()
+    widget.bridge.scheduler.start()
     if not widget.top_bar.start():
         widget.show()
     try:

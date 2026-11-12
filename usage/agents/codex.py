@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 
@@ -220,6 +221,96 @@ class Codex(Agent):
                 except (OSError, RuntimeError):
                     pass
             await stop(process)
+
+    async def activate_window(self, command, timeout):
+        """Start a usage window through an ephemeral read-only turn on the app server."""
+        with tempfile.TemporaryDirectory(prefix="agent-usage-") as directory:
+            process = await start(command, "app-server", cwd=directory)
+
+            async def send(message):
+                process.stdin.write((json.dumps(message) + "\n").encode())
+                await process.stdin.drain()
+
+            async def receive():
+                line = await process.stdout.readline()
+                if not line:
+                    raise RuntimeError("Native account connection closed")
+                return json.loads(line)
+
+            async def request(identifier, method, params):
+                await send(dict(id=identifier, method=method, params=params))
+                while True:
+                    message = await receive()
+                    if message.get("id") == identifier:
+                        if "error" in message:
+                            raise RuntimeError("Native account query failed")
+                        return message["result"]
+
+            try:
+                async with asyncio.timeout(timeout):
+                    await request(
+                        1,
+                        "initialize",
+                        {
+                            "clientInfo": {
+                                "name": "usage",
+                                "title": "Agent Usage",
+                                "version": VERSION,
+                            }
+                        },
+                    )
+                    await send({"method": "initialized"})
+                    account = await request(2, "account/read", {"refreshToken": False})
+                    if account.get("account") is None and account.get("requiresOpenaiAuth"):
+                        raise AgentUnavailable("login_required")
+                    if (account.get("account") or {}).get("type") in ("apiKey", "amazonBedrock"):
+                        raise AgentUnavailable("unsupported_account")
+                    windows = self.windows(await request(3, "account/rateLimits/read", {}))
+                    if any(w["used_percent"] >= 100 for w in windows):
+                        return dict(activated=False, reason="weekly_exhausted", windows=windows)
+                    if any(w["minutes"] < 10080 and w["used_percent"] > 0 for w in windows):
+                        return dict(activated=False, reason="already_active", windows=windows)
+                    thread = await request(
+                        4,
+                        "thread/start",
+                        {
+                            "ephemeral": True,
+                            "approvalPolicy": "never",
+                            "sandbox": "read-only",
+                            "baseInstructions": "Reply with ok.",
+                        },
+                    )
+                    thread_id = (
+                        (thread.get("thread") or {}).get("id")
+                        or thread.get("threadId")
+                        or "ephemeral"
+                    )
+                    await request(
+                        5,
+                        "turn/start",
+                        {"threadId": thread_id, "input": [{"type": "text", "text": "."}]},
+                    )
+                    while True:
+                        message = await receive()
+                        method = message.get("method")
+                        params = message.get("params") or {}
+                        if method in (
+                            "turn/completed",
+                            "codex/event/task_complete",
+                            "task_complete",
+                        ):
+                            turn = params.get("turn") or params
+                            if turn.get("status") in ("failed", "error"):
+                                raise RuntimeError("Native activation failed")
+                            break
+                    try:
+                        after = await request(6, "account/rateLimits/read", {})
+                        windows = self.windows(after) or windows
+                    except (RuntimeError, OSError):
+                        pass
+                    return dict(activated=True, reason="activated", windows=windows)
+            finally:
+                await stop(process)
 
     def demo_session(self, session, title, start, seconds, tokens):
         stamp = start.isoformat()
