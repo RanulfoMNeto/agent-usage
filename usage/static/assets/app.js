@@ -531,7 +531,7 @@ function renderConnections() {
 }
 
 // Window scheduler: one switch, and the learned day as a chart whose start markers can be edited.
-const SLOT_MINUTES = 30, LIKELY = 0.4, SNAP_MINUTES = 15;
+const SLOT_MINUTES = 30, SNAP_MINUTES = 15;
 const PAUSED = { disconnected: 'Agent disconnected', weekly_limit: 'Weekly limit reached', unavailable: 'Limits unavailable' };
 const TRUST_LABELS = { weekly: 'weekly rhythm', routine: 'usual routine', recent: 'recent days' };
 const scheduleEdits = new Map();
@@ -569,19 +569,35 @@ function schedulerStatus(entry) {
   }[status] || ['Off', ''];
 }
 
-// Windows on the shown day: planned starts first, then natural starts where use is likely.
-function schedulerWindows(starts, activity, span) {
-  const events = [
-    ...starts.map(minutes => [minutes, 0]),
-    ...activity.flatMap((value, slot) => value >= LIKELY ? [[slot * SLOT_MINUTES, 1]] : []),
-  ].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const windows = [];
-  let end = -1;
-  for (const [minutes, natural] of events) {
-    if (minutes < end) continue;
-    end = minutes + span; windows.push({ start: minutes, end, planned: !natural });
+const START_STATES = { ran: 'on time', deferred: 'deferred', missed: 'missed', failed: 'failed', skipped: 'skipped' };
+const EVENT_LABELS = {
+  activated: 'started', skipped_active: 'deferred', failed: 'failed', skipped_exhausted: 'limit reached',
+  skipped_unavailable: 'unavailable', skipped_disconnected: 'disconnected',
+};
+
+// The chain the scheduler runs from a start: it waits for an open window, starts at once when the
+// start has passed, and then opens each window as the last one resets, until midnight.
+function schedulerChain(origin, windows, now, span) {
+  if (origin === null || origin === undefined) return [];
+  const open = windows.find(item => item.open), chain = [];
+  for (let start = Math.max(origin, open ? open.end : origin, now ?? origin); start < 1440; start += span) chain.push({ start, end: start + span });
+  return chain;
+}
+
+// Tooltip lines for a half hour: its window, the day's start and what the scheduler did then.
+function schedulerDetails(overlay, slot) {
+  const from = slot * SLOT_MINUTES, to = from + SLOT_MINUTES, middle = from + SLOT_MINUTES / 2, lines = [];
+  const covers = item => item.start <= middle && middle < item.end, range = item => clockText(item.start) + '–' + clockText(item.end);
+  const real = overlay.windows.find(covers), planned = overlay.chain.find(covers);
+  if (real) lines.push((real.open ? 'Open' : 'Ended') + ' · ' + (real.by === 'scheduler' ? 'scheduler' : 'you') + ' · ' + range(real));
+  else if (planned) lines.push('Planned · ' + range(planned));
+  for (const minutes of overlay.starts) {
+    if (from <= minutes && minutes < to) lines.push('Start ' + clockText(minutes) + (START_STATES[overlay.startState] ? ' · ' + START_STATES[overlay.startState] : ''));
   }
-  return windows;
+  for (const event of overlay.events) {
+    if (from <= event.at && event.at < to) lines.push(clockText(event.at) + ' · ' + (EVENT_LABELS[event.status] || 'skipped'));
+  }
+  return lines;
 }
 
 function schedulerStarts(id) {
@@ -590,46 +606,70 @@ function schedulerStarts(id) {
 
 const schedulerOverlay = {
   id: 'schedulerOverlay',
+  // Real windows fill the day (the open one in the agent's color); planned ones are outlined.
   beforeDatasetsDraw(chart) {
     const overlay = chart.$scheduler; if (!overlay) return;
     const { ctx, chartArea: area, scales: { x } } = chart;
+    const edge = minutes => Math.round(x.getPixelForValue(Math.min(1440, Math.max(0, minutes)) / 60)) + .5;
     ctx.save();
-    overlay.windows.forEach((item, index) => {
-      const left = x.getPixelForValue(item.start / 60), right = x.getPixelForValue(Math.min(item.end, 1440) / 60);
-      ctx.fillStyle = translucent(overlay.band, index % 2 ? 0.05 : 0.1);
-      ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
-    });
+    for (const item of overlay.windows) {
+      const left = edge(item.start), right = edge(item.end);
+      if (right - left < 2) continue;
+      ctx.fillStyle = item.open ? translucent(overlay.tone, .2) : translucent(overlay.text, .08);
+      ctx.fillRect(left + .5, area.top, right - left - 1, area.bottom - area.top);
+    }
+    if (overlay.chain.length) {
+      ctx.strokeStyle = overlay.muted; ctx.lineWidth = 1; ctx.setLineDash([2, 3]); ctx.beginPath();
+      for (const minutes of [...overlay.chain.map(item => item.start), overlay.chain.at(-1).end]) {
+        if (minutes < 1440) { ctx.moveTo(edge(minutes), area.top); ctx.lineTo(edge(minutes), area.bottom); }
+      }
+      ctx.moveTo(edge(overlay.chain[0].start), area.top + .5); ctx.lineTo(edge(overlay.chain.at(-1).end), area.top + .5);
+      ctx.stroke();
+    }
     ctx.restore();
   },
   afterDatasetsDraw(chart) {
     const overlay = chart.$scheduler; if (!overlay) return;
     const { ctx, chartArea: area, scales: { x } } = chart;
+    const at = minutes => x.getPixelForValue(minutes / 60), top = area.top - 6;
     ctx.save();
-    // Resets: where a window ends inside the day and a fresh quota begins.
-    ctx.strokeStyle = overlay.muted; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
-    for (const item of overlay.windows) {
-      if (item.end >= 1440) continue;
-      const px = Math.round(x.getPixelForValue(item.end / 60)) + .5;
-      ctx.beginPath(); ctx.moveTo(px, area.top); ctx.lineTo(px, area.bottom); ctx.stroke();
-    }
-    ctx.setLineDash([]);
     if (overlay.now !== null) {
-      const px = x.getPixelForValue(overlay.now / 60);
-      ctx.fillStyle = overlay.muted;
-      ctx.beginPath(); ctx.moveTo(px, area.bottom - 5); ctx.lineTo(px - 3.5, area.bottom + 1); ctx.lineTo(px + 3.5, area.bottom + 1); ctx.fill();
+      ctx.strokeStyle = translucent(overlay.text, .55); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(at(overlay.now)) + .5, area.top); ctx.lineTo(Math.round(at(overlay.now)) + .5, area.bottom); ctx.stroke();
+    }
+    // What the scheduler did today: started (agent color), failed (red), otherwise muted.
+    for (const event of overlay.events) {
+      ctx.fillStyle = event.status === 'activated' ? overlay.tone : event.status === 'failed' ? overlay.danger : overlay.muted;
+      ctx.beginPath(); ctx.arc(at(event.at), area.bottom - 3, 2, 0, Math.PI * 2); ctx.fill();
     }
     ctx.font = '600 8px ' + Chart.defaults.font.family; ctx.textBaseline = 'middle';
-    overlay.starts.forEach((minutes, index) => {
-      const px = x.getPixelForValue(minutes / 60), top = area.top - 6;
-      ctx.strokeStyle = overlay.marker; ctx.lineWidth = overlay.active === index ? 2 : 1.5;
-      ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, area.bottom); ctx.stroke();
-      ctx.fillStyle = overlay.marker; ctx.strokeStyle = overlay.surface; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(px, top, overlay.active === index ? 5.5 : 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      const label = clockText(minutes), width = ctx.measureText(label).width;
-      const right = px + 8 + width <= chart.width;
+    const label = (text, px) => {
+      const right = px + 8 + ctx.measureText(text).width <= chart.width;
       ctx.fillStyle = overlay.text; ctx.textAlign = right ? 'left' : 'right';
-      ctx.fillText(label, right ? px + 8 : px - 8, top);
+      ctx.fillText(text, right ? px + 8 : px - 8, top);
+    };
+    // The day's start: filled when it ran or is ahead, hollow when it was missed or deferred.
+    overlay.starts.forEach((minutes, index) => {
+      const px = at(minutes), hollow = overlay.active < 0 && START_STATES[overlay.startState] && overlay.startState !== 'ran';
+      ctx.strokeStyle = hollow ? overlay.muted : overlay.marker; ctx.lineWidth = overlay.active === index ? 2 : 1.5;
+      ctx.setLineDash(hollow ? [2, 2] : []);
+      ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, area.bottom); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = hollow ? overlay.surface : overlay.marker; ctx.strokeStyle = hollow ? overlay.marker : overlay.surface; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, top, overlay.active === index ? 5.5 : 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      label(clockText(minutes), px);
     });
+    // The next start, when the chain runs from somewhere other than the day's start.
+    if (overlay.next !== null && !overlay.starts.includes(overlay.next)) {
+      const px = at(overlay.next), crowded = overlay.starts.some(minutes => Math.abs(at(minutes) - px) < 40);
+      ctx.fillStyle = overlay.tone; ctx.beginPath(); ctx.arc(px, top, 3.5, 0, Math.PI * 2); ctx.fill();
+      if (!crowded) label(clockText(overlay.next), px);
+    }
+    // A window still open at midnight: where it ends.
+    const tail = [...overlay.windows, ...overlay.chain].filter(item => item.start < 1440 && item.end > 1440).at(-1);
+    if (tail) {
+      ctx.font = '8px ' + Chart.defaults.font.family; ctx.fillStyle = overlay.muted; ctx.textAlign = 'right';
+      ctx.fillText('→' + clockText(tail.end), area.right - 2, area.bottom - 8);
+    }
     ctx.restore();
   },
 };
@@ -640,13 +680,19 @@ function renderSchedulerChart(id) {
   const plan = entry.plan, span = entry.window_minutes || 300, edit = scheduleEdits.get(id);
   const activity = plan.activity?.length === 1440 / SLOT_MINUTES ? plan.activity : Array(1440 / SLOT_MINUTES).fill(0);
   const starts = schedulerStarts(id), enabled = entry.schedule?.enabled === true, tone = agentColor(id);
-  const minute = new Date().getHours() * 60 + new Date().getMinutes();
+  const minute = new Date().getHours() * 60 + new Date().getMinutes(), now = plan.today ? minute : null;
+  const windows = Array.isArray(plan.windows) ? plan.windows : [], events = Array.isArray(plan.events) ? plan.events : [];
+  // While editing, preview the chain from the dragged start; when off, from the day's start.
+  const origin = edit ? edit.starts[0] : plan.next ?? (enabled ? null : starts[0]);
+  const chain = schedulerChain(origin, windows, now, span);
   const overlay = {
-    starts, windows: schedulerWindows(starts, activity, span), now: plan.today ? minute : null,
-    active: edit?.index ?? -1, band: color('text'), marker: enabled ? tone : color('muted'),
+    starts, windows, chain, events, now, next: chain[0]?.start ?? null, startState: edit ? null : plan.start_status,
+    active: edit?.index ?? -1, tone, marker: enabled ? tone : color('muted'), danger: color('danger'),
     muted: color('muted'), text: color('text'), surface: color('panel') || color('surface'),
   };
-  canvas.setAttribute('aria-label', agentName(id) + ' usage by hour' + (starts.length ? '; window starts at ' + starts.map(clockText).join(', ') : '; no window starts'));
+  $('scheduler-legend-' + id)?.style.setProperty('--tone', tone);
+  canvas.setAttribute('aria-label', agentName(id) + ' usage by hour' + (starts.length ? '; day starts at ' + starts.map(clockText).join(', ') : '; no start')
+    + (overlay.next !== null ? '; next window at ' + clockText(overlay.next) : ''));
   const key = 'scheduler-' + id;
   const signature = JSON.stringify([activity, overlay, document.documentElement.dataset.theme, preferences.style]);
   if (charts[key] && canvas.dataset.signature === signature) return;
@@ -670,11 +716,13 @@ function renderSchedulerChart(id) {
       tooltip: {
         enabled: !edit, displayColors: false, backgroundColor: color('surface'), titleColor: color('muted'), bodyColor: color('text'),
         titleFont: { size: 9, weight: 'normal' }, bodyFont: { size: 11, weight: '600' },
+        footerColor: color('text'), footerFont: { size: 9, weight: 'normal' }, footerMarginTop: 4,
         padding: 10, cornerRadius: Number(color('tooltip-radius')), caretSize: 3, caretPadding: 6, borderWidth: 0,
         filter: item => item.dataIndex > 0 && item.dataIndex <= activity.length,
         callbacks: {
           title: items => { const slot = items[0].dataIndex - 1; return clockText(slot * SLOT_MINUTES) + '–' + clockText((slot + 1) * SLOT_MINUTES); },
           label: item => Math.round(item.parsed.y * 100) + '% likely in use',
+          footer: items => items.length ? schedulerDetails(overlay, items[0].dataIndex - 1) : [],
         },
       },
     },
@@ -723,7 +771,8 @@ async function saveSchedule(id, patch) {
   finally { scheduleRevision++; scheduleEdits.delete(id); renderScheduler(); reportSize(); }
 }
 
-// Press the chart to add a start, drag a marker to move it, click a marker to remove it.
+// One start begins the day's chain: press the chart to set it, drag the marker to move it,
+// click the marker to return to the learned start.
 function attachSchedulerChart(id, canvas) {
   const locate = event => {
     const chart = charts['scheduler-' + id], rect = canvas.getBoundingClientRect();
@@ -733,16 +782,12 @@ function attachSchedulerChart(id, canvas) {
   const snap = minutes => Math.min(1440 - SNAP_MINUTES, Math.max(0, Math.round(minutes / SNAP_MINUTES) * SNAP_MINUTES));
   canvas.addEventListener('pointerdown', event => {
     if (event.button !== 0 || !charts['scheduler-' + id] || scheduleEdits.has(id)) return;
-    const { chart, px, minutes } = locate(event), span = scheduler?.agents?.[id]?.window_minutes || 300;
+    const { chart, px, minutes } = locate(event);
     if (px < chart.chartArea.left - 8 || px > chart.chartArea.right + 8) return;
-    const starts = schedulerStarts(id).slice();
+    const starts = schedulerStarts(id).slice(0, 1);
     let index = starts.findIndex(value => Math.abs(chart.scales.x.getPixelForValue(value / 60) - px) <= 8);
     const created = index < 0;
-    if (created) {
-      const value = snap(minutes);
-      if (starts.some(other => Math.abs(other - value) < span)) return;
-      starts.push(value); starts.sort((a, b) => a - b); index = starts.indexOf(value);
-    }
+    if (created) { starts.splice(0, starts.length, snap(minutes)); index = 0; }
     scheduleEdits.set(id, { starts, index, created, moved: false, origin: event.clientX });
     try { canvas.setPointerCapture(event.pointerId); } catch { /* synthetic pointers cannot be captured */ }
     event.preventDefault();
@@ -765,7 +810,7 @@ function attachSchedulerChart(id, canvas) {
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     const starts = !edit.moved && !edit.created ? edit.starts.filter((_, i) => i !== edit.index) : edit.starts;
     edit.starts = starts; edit.index = -1;
-    // Without any start of your own, the scheduler goes back to learned times.
+    // Without a start of your own, the scheduler goes back to the learned one.
     saveSchedule(id, { times: starts.length ? starts.map(clockText) : null });
   });
   canvas.addEventListener('pointercancel', () => {
@@ -805,10 +850,14 @@ function buildAgentSettings() {
     toggleRow.append(el('span', 'Start windows automatically'), toggle);
     const chartWrap = el('div', undefined, 'scheduler-chart'), canvas = el('canvas'); canvas.id = 'scheduler-chart-' + id; canvas.setAttribute('role', 'img');
     chartWrap.append(canvas); attachSchedulerChart(id, canvas);
+    const legend = el('p', undefined, 'scheduler-legend caption'); legend.id = 'scheduler-legend-' + id;
+    for (const [kind, text] of [['open', 'Open'], ['ended', 'Ended'], ['planned', 'Planned']]) {
+      const item = el('span', text); item.prepend(el('i', undefined, kind)); legend.append(item);
+    }
     const foot = el('p', undefined, 'scheduler-foot caption'), origin = el('span'); origin.id = 'scheduler-source-' + id;
     const learned = el('button', 'Use learned times', 'text-button'); learned.type = 'button'; learned.id = 'scheduler-reset-' + id; learned.dataset.schedulerReset = id; learned.hidden = true;
     foot.append(origin, learned);
-    schedBody.append(toggleRow, chartWrap, foot);
+    schedBody.append(toggleRow, chartWrap, legend, foot);
     sched.append(schedSummary, schedBody);
     card.append(header, source, sched); section.append(card);
   }

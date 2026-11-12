@@ -10,12 +10,15 @@ The pipeline runs locally and is rebuilt once per day:
    past day scores how well each would have predicted it, and an online mixture (exponential
    weights with a fixed share) moves trust to whichever explains current behavior. A new
    routine takes over within a few days; a single odd day barely matters.
-3. Optimization. The forecast is a weighted set of plausible days. For a set of start times,
-   the exact window chain is simulated on each plausible day and scored with a saturating
-   utility per window (a window absorbs at most its quota), minus a small cost for every
-   start that actually runs. Greedy selection with local moves picks the plan.
-4. Recommendation. One plan per date, limited to times the app is usually running, with the
+3. Optimization. The forecast is a weighted set of plausible days. For each candidate start
+   time, the chain the scheduler runs is simulated on each plausible day and scored with a
+   saturating utility per window (a window absorbs at most its quota), minus a small cost for
+   every window the scheduler opens. The best start wins if it beats starting none.
+4. Recommendation. One start per date, limited to times the app is usually running, with the
    window capacity calibrated against the usage percentage the agent reports.
+5. Execution. From the day's start until midnight, whenever no window is open one is started:
+   at the start itself, as soon as the app is running when the start was missed, and right
+   when a window ends. A window still open at the start defers it to that window's reset.
 """
 
 import asyncio
@@ -45,14 +48,18 @@ LEARNING_RATE = 0.5
 FIXED_SHARE = 0.05
 PRIOR_DAYS = 0.5
 ACTIVATION_COST = 0.02
-MAX_STARTS = 4
 MAX_SCENARIOS = 60
 ONLINE_DAYS = 28
 CAPACITY_SAMPLES = 30
 OBSERVE_SECONDS = 60
-GRACE_SECONDS = 900
 BACKOFF_SECONDS = 300
+SETTLE_SECONDS = 30
+LOOKAHEAD_DAYS = 9
+ON_TIME_SECONDS = 120
+KEEP_WINDOWS_SECONDS = 2 * 86400
+MAX_WINDOWS = 16
 MAX_HISTORY = 50
+START_OUTCOMES = {"activated": "ran", "skipped_active": "deferred", "failed": "failed"}
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 DEFAULT_SCHEDULE = {"enabled": False, "times": None}
 
@@ -229,71 +236,42 @@ def availability(online, today):
     return [(totals[slot] + 1.0) / (mass + 1.0) for slot in range(SLOTS)]
 
 
-def _utility(events, starts, span, capacity):
-    """Exact window chain on one day: saturating utility and starts that opened a window."""
+def _utility(demands, first, span, capacity):
+    """Exact window chain on one day: saturating utility and windows the scheduler opened.
+
+    Before the day's first start only prompts open windows. From it until midnight the
+    scheduler opens one whenever none is open: at the start, or when the open one resets.
+    """
     total, fired, end, load = 0.0, 0, -1, 0.0
-    i = j = 0
-    while i < len(events) or j < len(starts):
-        if j < len(starts) and (i >= len(events) or starts[j] <= events[i][0]):
-            slot, amount = starts[j], 0.0
-            j += 1
-            opens = slot >= end
-            fired += opens
-        else:
-            slot, amount = events[i]
-            i += 1
-            opens = slot >= end
-        if opens:
+    for slot in range(SLOTS):
+        amount = demands.get(slot, 0.0)
+        chained = first is not None and slot >= first
+        if slot >= end and (chained or amount):
             total += 1.0 - math.exp(-load / capacity)
             end, load = slot + span, 0.0
+            fired += chained
         load += amount
     return total + 1.0 - math.exp(-load / capacity), fired
 
 
-def _score(scenarios, starts, span, capacity):
-    value = 0.0
-    for weight, events in scenarios:
-        utility, fired = _utility(events, starts, span, capacity)
-        value += weight * (utility - ACTIVATION_COST * fired)
-    return value
-
-
 def optimize(scenarios, span, capacity, allowed):
-    """Start slots maximizing expected utility over plausible days, and the gain over none."""
-    base = _score(scenarios, [], span, capacity)
+    """The day's start slot maximizing expected utility over plausible days, and its gain."""
+    days = [(weight, dict(events)) for weight, events in scenarios]
+
+    def score(first):
+        value = 0.0
+        for weight, demands in days:
+            utility, fired = _utility(demands, first, span, capacity)
+            value += weight * (utility - ACTIVATION_COST * fired)
+        return value
+
+    base = score(None)
     chosen, best = [], base
-    candidates = [slot for slot in range(SLOTS) if allowed[slot]]
-    for _ in range(MAX_STARTS):
-        pick = None
-        for slot in candidates:
-            if slot in chosen:
-                continue
-            trial = sorted([*chosen, slot])
-            value = _score(scenarios, trial, span, capacity)
+    for slot in range(SLOTS):
+        if allowed[slot]:
+            value = score(slot)
             if value > best + 1e-9:
-                best, pick = value, trial
-        if pick is None:
-            break
-        chosen = pick
-    improved = True
-    while improved and chosen:
-        improved = False
-        for index in range(len(chosen)):
-            rest = chosen[:index] + chosen[index + 1 :]
-            for move in (-2, -1, 1, 2, None):
-                if move is None:
-                    trial = rest
-                else:
-                    slot = chosen[index] + move
-                    if not 0 <= slot < SLOTS or not allowed[slot] or slot in rest:
-                        continue
-                    trial = sorted([*rest, slot])
-                value = _score(scenarios, trial, span, capacity)
-                if value > best + 1e-9:
-                    best, chosen, improved = value, trial, True
-                    break
-            if improved:
-                break
+                chosen, best = [slot], value
     return chosen, best - base
 
 
@@ -347,7 +325,7 @@ class UsageModel:
         return self._forecasts[target]
 
     def plan(self, target):
-        """Learned start minutes for a date and their expected utility gain."""
+        """Learned start minute for a date (none or one) and its expected utility gain."""
         if target not in self._plans:
             starts, gain = [], 0.0
             if self.ready:
@@ -358,18 +336,35 @@ class UsageModel:
             self._plans[target] = (starts, gain)
         return self._plans[target]
 
-    def starts(self, schedule, target):
-        """Start minutes on a date: learned, or fixed times on days the agent is usually used."""
+    def start(self, schedule, target):
+        """Minute a date's chain starts: learned, or the earliest fixed time on days the agent
+        is usually used; None when nothing starts that day."""
         if schedule["times"] is None:
-            return self.plan(target)[0]
+            starts = self.plan(target)[0]
+            return starts[0] if starts else None
         if self.ready and self.forecast(target)[1] < 0.5:
-            return []
-        kept, end = [], -1
-        for minutes in map(_minutes, schedule["times"]):
-            if minutes >= end:
-                kept.append(minutes)
-                end = minutes + self.window_minutes
-        return kept
+            return None
+        return _minutes(schedule["times"][0])
+
+
+def _windows(saved):
+    """Kept short windows from saved state, ignoring malformed entries."""
+    return [
+        {"start": float(w["start"]), "end": float(w["end"]), "by": w.get("by", "you")}
+        for w in (saved if isinstance(saved, list) else [])
+        if isinstance(w, dict) and number(w.get("start")) is not None and number(w.get("end"))
+    ]
+
+
+def _start_status(start_at, events, now):
+    """How a day's start went: pending, ran, deferred, failed, skipped or missed."""
+    if start_at > now:
+        return "pending"
+    for event in events:
+        stamp = number(event.get("timestamp"))
+        if stamp is not None and start_at - 1 <= stamp <= start_at + ON_TIME_SECONDS:
+            return START_OUTCOMES.get(event.get("status"), "skipped")
+    return "missed"
 
 
 def window_state(agent, limit_entry, rows, state, now=None):
@@ -391,25 +386,24 @@ def window_state(agent, limit_entry, rows, state, now=None):
     issue = entry.get("issue")
     unavailable = not disconnected and not windows and bool(issue)
     short_windows = [w for w in windows if w["minutes"] < 10080]
-    exhausted = any(w["used_percent"] >= 100 for w in windows)
+    spent = [w["resets_at"] for w in windows if w["used_percent"] >= 100]
+    known = number(state.get("active_until"))
 
     active, active_until = False, None
     in_use = [w for w in short_windows if w["used_percent"] > 0]
     if in_use:
         active, active_until = True, min(w["resets_at"] for w in in_use)
-    elif (
-        number(state.get("active_until")) is not None
-        and state["active_until"] > now
-        and now - (number(state.get("last_activated_at")) or 0) < window_minutes * 60
-    ):
-        active, active_until = True, float(state["active_until"])
+    elif known is not None and now < known <= now + window_minutes * 60:
+        active, active_until = True, known
     elif not short_windows:
+        # Prompts up to a reset the scheduler saw belong to windows that already ended.
+        since = max(now - window_minutes * 60, known if known is not None else -math.inf)
         recent = [
             r["start"]
             for r in (rows or [])
             if isinstance(r, dict)
             and number(r.get("start")) is not None
-            and now - window_minutes * 60 < r["start"] <= now
+            and since < r["start"] <= now
         ]
         if recent:
             active, active_until = True, min(recent) + window_minutes * 60
@@ -417,7 +411,8 @@ def window_state(agent, limit_entry, rows, state, now=None):
         "issue": issue,
         "disconnected": disconnected,
         "unavailable": unavailable,
-        "weekly_exhausted": exhausted,
+        "weekly_exhausted": bool(spent),
+        "exhausted_until": max(spent) if spent else None,
         "window_minutes": window_minutes,
         "active": active,
         "active_until": active_until,
@@ -444,6 +439,7 @@ class Scheduler:
         self.models, self.keys, self.observed = {}, {}, {}
         self.rows_cache = None
         self.dirty = False
+        self.wake_at = None
         self._load()
 
     def _persistent(self):
@@ -463,8 +459,11 @@ class Scheduler:
                 saved = self.usage.setting(db, "scheduler_state")
             states = saved.get("state")
             if isinstance(states, dict):
+                # Slot markers belonged to the per-start scheduler; the chain needs none.
                 self.state = {
-                    k: v for k, v in states.items() if k in self.agents and isinstance(v, dict)
+                    k: {key: value for key, value in v.items() if not key.startswith("last_slot")}
+                    for k, v in states.items()
+                    if k in self.agents and isinstance(v, dict)
                 }
             history = saved.get("history")
             if isinstance(history, list):
@@ -622,22 +621,31 @@ class Scheduler:
             self._save()
         return self.snapshot()
 
-    def _slots(self, agent_id, model, schedule, first, count):
-        """Planned activations as (timestamp, key) from a date onward, in order."""
-        for offset in range(count):
-            day = first + timedelta(days=offset)
-            for minutes in model.starts(schedule, day):
-                yield _at(day, minutes), f"{agent_id}:{day.isoformat()}:{_clock(minutes)}"
+    @staticmethod
+    def _next_start(model, schedule, state, now, busy_until=None):
+        """When the next window should start: now when one is due, or later; None without one.
 
-    def _pending(self, agent_id, model, schedule, state, now, days=9):
-        """Planned activations not yet handled, including any still inside its grace period."""
-        last_slot = state.get("last_slot")
-        last_at = number(state.get("last_slot_at")) or 0.0
-        for stamp, key in self._slots(
-            agent_id, model, schedule, model.today - timedelta(days=1), days
-        ):
-            if stamp >= now - GRACE_SECONDS and key != last_slot and stamp > last_at:
-                yield stamp, key
+        Each day runs one chain from its start until midnight: a start missed while the app was
+        not running is due as soon as it runs, and a start that finds a window open waits for
+        its reset. A day's chain never carries into the next day.
+        """
+        error_at = number(state.get("last_error_at")) or 0.0
+        ready = max(
+            now,
+            number(state.get("active_until")) or 0.0,
+            number(state.get("blocked_until")) or 0.0,
+            error_at + BACKOFF_SECONDS if error_at else 0.0,
+            busy_until or 0.0,
+        )
+        for offset in range(LOOKAHEAD_DAYS):
+            day = model.today + timedelta(days=offset)
+            minutes = model.start(schedule, day)
+            if minutes is None:
+                continue
+            moment = max(_at(day, minutes), ready)
+            if moment < _at(day + timedelta(days=1), 0):
+                return moment
+        return None
 
     def _record(self, agent_id, now, source, status, reason, resets_at=None):
         """Append an activation event; callers hold the lock."""
@@ -652,19 +660,56 @@ class Scheduler:
         self.history = [*self.history, event][-MAX_HISTORY:]
         return event
 
-    def activate(self, agent_id, source="learned", slot=None, now=None):
-        """Start a window unless one is active, the agent is unavailable or limits are spent."""
+    def _remember(self, agent_id, end, seconds, by, now):
+        """Keep a short window for the chart, from yesterday on; callers hold the lock.
+
+        Windows never overlap, so one overlapping a kept window is that window: its reset is
+        refreshed, and a window the scheduler started stays the scheduler's.
+        """
+        state = self.state.setdefault(agent_id, {})
+        old = state.get("windows")
+        kept = [dict(w) for w in _windows(old) if w["end"] > now - KEEP_WINDOWS_SECONDS]
+        start = end - seconds
+        same = next((w for w in kept if w["start"] < end and start < w["end"]), None)
+        if same is None:
+            kept.append({"start": start, "end": end, "by": by})
+        else:
+            origin = "scheduler" if "scheduler" in (by, same["by"]) else by
+            same.update(start=start, end=end, by=origin)
+        kept = sorted(kept, key=lambda w: w["start"])[-MAX_WINDOWS:]
+        if kept != old:
+            state["windows"] = kept
+            self.dirty = True
+
+    def _seen(self, agent_id, entry, now):
+        """Remember the short windows in use the agent reports; callers hold the lock."""
+        for window in (entry or {}).get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            minutes, used = number(window.get("minutes")), number(window.get("used_percent"))
+            resets_at = number(window.get("resets_at"))
+            if None in (minutes, used, resets_at) or minutes >= 10080 or used <= 0:
+                continue
+            if resets_at > now:
+                self._remember(agent_id, resets_at, minutes * 60, "you", now)
+
+    def activate(self, agent_id, source="learned", now=None):
+        """Start a window unless one is active, the agent is unavailable or limits are spent.
+
+        Every outcome other than a start records when to try again: the open window's reset,
+        the spent limit's reset, or a backoff after a failure.
+        """
         if agent_id not in self.agents:
             raise ValueError("Unknown agent")
         now = time.time() if now is None else float(now)
         agent = self.agents[agent_id]
+        window_seconds = int(getattr(agent, "window_minutes", 300)) * 60
 
-        def finish(status, reason, resets_at=None, handled=True, **changes):
+        def finish(status, reason, resets_at=None, window=None, **changes):
             with self.lock:
-                agent_state = self.state.setdefault(agent_id, {})
-                agent_state.update(changes)
-                if slot and handled:
-                    agent_state["last_slot"], agent_state["last_slot_at"] = slot
+                self.state.setdefault(agent_id, {}).update(changes)
+                if window:
+                    self._remember(agent_id, window[0], window_seconds, window[1], now)
                 event = self._record(agent_id, now, source, status, reason, resets_at)
                 self._save()
             return event
@@ -672,16 +717,21 @@ class Scheduler:
         if self._connections().get(agent_id) is False:
             return finish("skipped_disconnected", "disconnected")
         rows = self._rows().get(agent_id, [])
+        entry = self._limit_entries().get(agent_id)
         with self.lock:
+            self._seen(agent_id, entry, now)
             current = dict(self.state.get(agent_id) or {})
-        info = window_state(agent, self._limit_entries().get(agent_id), rows, current, now=now)
+        info = window_state(agent, entry, rows, current, now=now)
         if info["unavailable"]:
             reason = info.get("issue") or "query_failed"
-            return finish("skipped_unavailable", reason, handled=False, last_error_at=now)
+            return finish("skipped_unavailable", reason, last_error_at=now)
         if info["weekly_exhausted"]:
-            return finish("skipped_exhausted", "weekly_exhausted")
+            return finish(
+                "skipped_exhausted", "weekly_exhausted", blocked_until=info["exhausted_until"]
+            )
         if info["active"]:
-            return finish("skipped_active", "already_active", info["active_until"])
+            until = min(info["active_until"], now + window_seconds)
+            return finish("skipped_active", "already_active", until, active_until=until)
 
         try:
             if hasattr(self.limits, "activate"):
@@ -699,7 +749,7 @@ class Scheduler:
                 if isinstance(exc, TimeoutError)
                 else "query_failed"
             )
-            return finish("failed", reason, handled=False, last_error_at=now)
+            return finish("failed", reason, last_error_at=now)
 
         windows = outcome.get("windows") or []
         if windows and isinstance(getattr(self.limits, "results", None), dict):
@@ -718,14 +768,30 @@ class Scheduler:
             and number(w.get("resets_at")) is not None
             and w["resets_at"] > now
         ]
-        resets_at = min(resets) if resets else (now + info["window_minutes"] * 60)
+        resets_at = min(min(resets), now + window_seconds) if resets else now + window_seconds
+        if not activated and reason == "weekly_exhausted":
+            spent = [
+                w["resets_at"]
+                for w in windows
+                if isinstance(w, dict)
+                and (number(w.get("used_percent")) or 0) >= 100
+                and (number(w.get("resets_at")) or 0) > now
+            ]
+            blocked = max(spent) if spent else now + BACKOFF_SECONDS
+            return finish("skipped_exhausted", reason, blocked_until=blocked)
         if not activated:
-            status = "skipped_exhausted" if reason == "weekly_exhausted" else "skipped_active"
-            return finish(status, reason, resets_at if resets else None)
+            # Wait for the open window's reset; without one ahead, the agent still counts a
+            # window that just reset, so try again shortly.
+            if not resets:
+                return finish("skipped_active", reason, active_until=now + SETTLE_SECONDS)
+            return finish(
+                "skipped_active", reason, resets_at, (resets_at, "you"), active_until=resets_at
+            )
         return finish(
             "activated",
             reason,
             resets_at,
+            (resets_at, "scheduler"),
             last_activated_at=now,
             active_until=resets_at,
             last_error_at=0,
@@ -745,10 +811,12 @@ class Scheduler:
                 self.dirty = True
 
     def tick(self, now=None):
-        """Run every planned activation that is due for enabled, connected agents."""
+        """Start a window for every enabled, connected agent whose chain is due, and note when
+        the next one is due so the worker wakes right then."""
         now = time.time() if now is None else float(now)
+        self.wake_at = None
         self._mark_online(now)
-        triggered = []
+        triggered, upcoming = [], []
         connections = self._connections()
         grouped = None
         for agent_id, agent in self.agents.items():
@@ -759,17 +827,16 @@ class Scheduler:
             model = self._model(agent, grouped.get(agent_id, []), now)
             with self.lock:
                 state = dict(self.state.get(agent_id) or {})
-            error_at = number(state.get("last_error_at")) or 0.0
-            if error_at and now < error_at + BACKOFF_SECONDS:
-                continue
-            due = None
-            for stamp, key in self._pending(agent_id, model, schedule, state, now, days=2):
-                if stamp > now:
-                    break
-                due = (key, stamp)
-            if due:
+            due = self._next_start(model, schedule, state, now)
+            if due is not None and due <= now:
                 source = "learned" if schedule["times"] is None else "custom"
-                triggered.append(self.activate(agent_id, source=source, slot=due, now=now))
+                triggered.append(self.activate(agent_id, source=source, now=now))
+                with self.lock:
+                    state = dict(self.state.get(agent_id) or {})
+                due = self._next_start(model, schedule, state, now)
+            if due is not None:
+                upcoming.append(due)
+        self.wake_at = min(upcoming, default=None)
         with self.lock:
             if self.dirty:
                 self._save()
@@ -781,6 +848,8 @@ class Scheduler:
         entries = self._limit_entries(limits_snapshot)
         grouped = self._rows()
         with self.lock:
+            for agent_id in self.agents:
+                self._seen(agent_id, entries.get(agent_id), now)
             schedules = {a: dict(self.schedules.get(a) or DEFAULT_SCHEDULE) for a in self.agents}
             states = {a: dict(self.state.get(a) or {}) for a in self.agents}
             history = list(self.history)
@@ -790,9 +859,11 @@ class Scheduler:
             self._observe(agent_id, entries.get(agent_id), rows, now)
             model = self._model(agent, rows, now)
             info = window_state(agent, entries.get(agent_id), rows, state, now=now)
-            upcoming = next(self._pending(agent_id, model, schedule, state, now), None)
-            shown = _local(upcoming[0]).date() if upcoming else model.today
-            starts = model.starts(schedule, shown)
+            upcoming = self._next_start(
+                model, schedule, state, now, info["active_until"] if info["active"] else None
+            )
+            shown = _local(upcoming).date() if upcoming is not None else model.today
+            start = model.start(schedule, shown)
             reason = (
                 "disconnected"
                 if info["disconnected"]
@@ -810,17 +881,35 @@ class Scheduler:
                 else "learning"
                 if schedule["times"] is None and not model.ready
                 else "scheduled"
-                if upcoming
+                if upcoming is not None
                 else "idle"
             )
             events = [item for item in history if item.get("agent") == agent_id]
+            # The chart's day in wall-clock minutes; windows may start before it or end after.
+            begin, end = _at(shown, 0), _at(shown + timedelta(days=1), 0)
+            midnight = datetime.combine(shown, clock())
+
+            def minute(stamp, midnight=midnight):
+                return round((datetime.fromtimestamp(stamp) - midnight).total_seconds() / 60)
+
+            windows = [
+                {
+                    "start": minute(w["start"]),
+                    "end": minute(w["end"]),
+                    "by": w["by"],
+                    "open": w["start"] <= now < w["end"],
+                }
+                for w in _windows(state.get("windows"))
+                if w["start"] < end and w["end"] > begin
+            ]
+            today = [e for e in events if begin <= (number(e.get("timestamp")) or 0) < end]
             result[agent_id] = {
                 "id": agent_id,
                 "schedule": schedule,
                 "status": status,
                 "reason": reason,
                 "window_minutes": info["window_minutes"],
-                "next_activation_at": upcoming[0] if upcoming and status == "scheduled" else None,
+                "next_activation_at": upcoming if status == "scheduled" else None,
                 "active_until": info["active_until"] if info["active"] else None,
                 "last_activated_at": state.get("last_activated_at"),
                 "last_event": events[-1] if events else None,
@@ -828,7 +917,15 @@ class Scheduler:
                     "date": shown.isoformat(),
                     "today": shown == model.today,
                     "source": "learned" if schedule["times"] is None else "custom",
-                    "starts": [_clock(minutes) for minutes in starts],
+                    "starts": [] if start is None else [_clock(start)],
+                    "start_status": None
+                    if start is None
+                    else _start_status(_at(shown, start), today, now),
+                    "next": minute(upcoming) if status == "scheduled" else None,
+                    "windows": windows,
+                    "events": [
+                        {"at": minute(e["timestamp"]), "status": e.get("status")} for e in today
+                    ],
                     "activity": [round(v, 3) for v in model.forecast(shown)[0]],
                 },
                 "model": {
@@ -853,7 +950,11 @@ class Scheduler:
                     self.tick()
                 except Exception as exc:
                     logging.warning("Scheduler check failed (%s)", type(exc).__name__)
-                if self.stop_event.wait(self.refresh_seconds):
+                # Wake exactly when the next start is due, so a reset is followed at once.
+                delay = self.refresh_seconds
+                if self.wake_at is not None:
+                    delay = min(delay, max(1.0, self.wake_at - time.time()))
+                if self.stop_event.wait(delay):
                     break
 
         self.worker = threading.Thread(target=watch, daemon=True, name="agent-usage-scheduler")

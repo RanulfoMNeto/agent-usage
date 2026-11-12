@@ -950,7 +950,7 @@ class DesktopTests(unittest.TestCase):
                 r"^(Next|Tomorrow|[A-Z][a-z]{2}) \d\d:\d\d$",
             )
 
-            # Press the chart to add a start, drag it, click it to remove it.
+            # One start begins the chain: press the chart to set it, drag it, click it to go back.
             run("""window.pointer = (type, hour) => {
                 const chart = charts['scheduler-claude'], canvas = chart.canvas;
                 const rect = canvas.getBoundingClientRect(), ratio = rect.width / canvas.offsetWidth;
@@ -961,16 +961,31 @@ class DesktopTests(unittest.TestCase):
                 }));
             }""")
             run("pointer('pointerdown', 15); pointer('pointerup', 15)")
-            wait_for(
-                "JSON.stringify(scheduler.agents.claude.schedule.times)==="
-                + json.dumps(json.dumps(sorted([*learned, "15:00"]), separators=(",", ":")))
-            )
+            wait_for("JSON.stringify(scheduler.agents.claude.schedule.times)==='[\"15:00\"]'")
             self.assertEqual(evaluate("$('scheduler-source-claude').textContent"), "Your times")
             self.assertFalse(evaluate("$('scheduler-reset-claude').hidden"))
+            # The planned chain runs from the next start, window after window, until midnight.
+            self.assertTrue(
+                evaluate("""(()=>{
+                    const overlay=charts['scheduler-claude'].$scheduler, chain=overlay.chain;
+                    return chain.length>0 && chain[0].start===overlay.next
+                        && chain[0].start>=Math.min(900, overlay.now ?? 900)
+                        && chain.at(-1).end>=1440
+                        && chain.every((w,i)=>i===0 || w.start===chain[i-1].end);
+                })()""")
+            )
+            self.assertEqual(
+                evaluate("[...$('scheduler-legend-claude').children].map(e=>e.textContent).join()"),
+                "Open,Ended,Planned",
+            )
             run("pointer('pointerdown', 15); pointer('pointermove', 16); pointer('pointerup', 16)")
-            wait_for("scheduler.agents.claude.schedule.times.includes('16:00')")
-            self.assertNotIn("15:00", evaluate("scheduler.agents.claude.schedule.times"))
+            wait_for("JSON.stringify(scheduler.agents.claude.schedule.times)==='[\"16:00\"]'")
             run("pointer('pointerdown', 16); pointer('pointerup', 16)")
+            wait_for("scheduler.agents.claude.schedule.times===null")
+            self.assertEqual(
+                evaluate("JSON.stringify(scheduler.agents.claude.plan.starts)"), json.dumps(learned)
+            )
+            run("pointer('pointerdown', 15); pointer('pointerup', 15)")
             wait_for("scheduler.agents.claude.schedule.times?.length===1")
             run("$('scheduler-reset-claude').click()")
             wait_for("scheduler.agents.claude.schedule.times===null")
