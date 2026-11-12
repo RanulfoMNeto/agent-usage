@@ -33,6 +33,31 @@ class DemoLimits:
     def __init__(self, agents=AGENTS):
         self.agents = agents
         self.started_at = time.time()
+        self.activated = {}
+
+    def _windows_for(self, agent, now):
+        items = [
+            dict(bucket=b, minutes=m, used_percent=u, resets_at=self.started_at + r)
+            for b, m, u, r in agent.demo_limits
+        ]
+        extra = self.activated.get(agent.id)
+        if extra and extra["resets_at"] > now and not any(w["minutes"] < 10080 for w in items):
+            items.insert(0, dict(extra))
+        return [dict(item, id=window_id(agent, item)) for item in items if item["resets_at"] > now]
+
+    def activate(self, agent, now=None):
+        now = time.time() if now is None else float(now)
+        windows = self._windows_for(agent, now)
+        if any(w["used_percent"] >= 100 for w in windows):
+            return dict(activated=False, reason="weekly_exhausted", windows=windows)
+        if any(w["minutes"] < 10080 and w["used_percent"] > 0 for w in windows):
+            return dict(activated=False, reason="already_active", windows=windows)
+        bucket = agent.demo_limits[0][0] if agent.demo_limits else None
+        minutes = getattr(agent, "window_minutes", 300)
+        self.activated[agent.id] = dict(
+            bucket=bucket, minutes=minutes, used_percent=1, resets_at=now + minutes * 60
+        )
+        return dict(activated=True, reason="activated", windows=self._windows_for(agent, now))
 
     def snapshot(self, connections=None):
         now = time.time()
@@ -43,13 +68,7 @@ class DemoLimits:
                     status="available",
                     updated_at=now,
                     connected=True,
-                    windows=[
-                        dict(item, id=window_id(agent, item))
-                        for item in (
-                            dict(bucket=b, minutes=m, used_percent=u, resets_at=self.started_at + r)
-                            for b, m, u, r in agent.demo_limits
-                        )
-                    ],
+                    windows=self._windows_for(agent, now),
                 )
                 for agent in self.agents.values()
             ]

@@ -125,8 +125,8 @@ select:disabled { cursor: default; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .totals { display: grid; justify-items: end; gap: 1px; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .totals strong { font-weight: var(--weight); color: var(--text); }
-.history-chart { position: relative; height: 120px; margin: 8px 0 4px; }
-.history-chart canvas { cursor: crosshair; }
+.history-chart { position: relative; min-width: 0; width: 100%; height: 120px; margin: 8px 0 4px; overflow: hidden; }
+.history-chart canvas { display: block; max-width: 100%; cursor: crosshair; }
 .history-chart .empty { padding-top: 40px; }
 .heatmap { --heat: var(--neutral); margin: 10px 0 12px; }
 .heatmap-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 10px; font-weight: var(--weight); }
@@ -187,7 +187,7 @@ select:disabled { cursor: default; }
 .connection[data-state='error']::before { background: var(--danger); }
 dialog { max-width: none; max-height: none; overflow: visible; border: var(--stroke) solid var(--edge); border-radius: var(--radius); background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 dialog::backdrop { background: transparent; }
-.dialog-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.dialog-header { cursor: grab; user-select: none; display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .dialog-header h2 { color: var(--text); line-height: 28px; font-size: 16px; font-weight: var(--weight); }
 .dialog-actions { display: flex; align-items: center; gap: 2px; }
 .help { margin: 0 0 12px; padding: 10px 12px 10px 26px; border-radius: var(--control-radius); background: var(--raised); color: var(--muted); font-size: 10px; line-height: 1.6; }
@@ -207,9 +207,17 @@ dialog::backdrop { background: transparent; }
 .range-field output { min-width: 30px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
 .agent-settings { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .agent-settings > h2 { margin-bottom: 10px; color: var(--text); font-size: 11px; }
-.agent-card { margin-top: 8px; padding: 12px; border: var(--stroke) solid var(--edge); border-radius: var(--card-radius); background: var(--panel); }
-.agent-source { margin-top: 10px; }
-.agent-source summary { color: var(--muted); font-size: 9px; cursor: pointer; }
+.agent-card { min-width: 0; margin-top: 8px; padding: 12px; border: var(--stroke) solid var(--edge); border-radius: var(--card-radius); background: var(--panel); }
+.agent-source, .agent-scheduler { margin-top: 8px; }
+.agent-source summary, .agent-scheduler summary { color: var(--muted); font-size: 9px; cursor: pointer; }
+.scheduler-summary { float: right; color: var(--text); font-weight: var(--weight); }
+.scheduler-summary[data-state='off'] { color: var(--muted); font-weight: 400; }
+.scheduler-summary[data-state='failed'] { color: var(--danger); }
+.scheduler-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 8px; min-width: 0; }
+.scheduler-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font-size: 10px; cursor: pointer; }
+.scheduler-chart { position: relative; min-width: 0; width: 100%; height: 96px; overflow: hidden; }
+.scheduler-chart canvas { display: block; max-width: 100%; cursor: pointer; touch-action: none; }
+.scheduler-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin: 0; }
 .agent-source .source-path { margin-top: 8px; }
 .source-reset { float: right; margin-top: 8px; }
 .source-label { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 10px; }

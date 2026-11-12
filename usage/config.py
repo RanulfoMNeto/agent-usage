@@ -44,6 +44,14 @@ def load_config(path=None):
         raise ValueError("Invalid limit refresh interval")
     if not 1 <= limits["timeout_seconds"] <= 30:
         raise ValueError("Invalid limit query timeout")
+    scheduler = config.get("scheduler", {})
+    if (
+        not isinstance(scheduler, dict)
+        or set(scheduler) - {"refresh_seconds"}
+        or type(scheduler.get("refresh_seconds")) is not int
+        or not 1 <= scheduler["refresh_seconds"] <= 300
+    ):
+        raise ValueError("Invalid scheduler refresh interval")
     for agent, values in config["agents"].items():
         if (
             agent not in AGENTS

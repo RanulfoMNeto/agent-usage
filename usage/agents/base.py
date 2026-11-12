@@ -55,6 +55,8 @@ class Agent:
     """Hosts a browser sign-in may open."""
     demo_limits = ((None, 10080, 30, 259200),)
     """Fictional limits for the demo: (bucket, minutes, used percent, seconds until reset)."""
+    window_minutes = 300
+    """Short rolling usage window duration in minutes, used by the window scheduler."""
 
     def install_directories(self):
         """Native installation directories searched when the command is not on PATH."""
@@ -78,6 +80,10 @@ class Agent:
 
     async def read_limits(self, command, timeout, login=None):
         """Query account limits through the native client, as normalized windows."""
+        raise NotImplementedError
+
+    async def activate_window(self, command, timeout):
+        """Start a usage window with a minimal turn, without persisting a session."""
         raise NotImplementedError
 
     def demo_session(self, session, title, start, seconds, tokens):

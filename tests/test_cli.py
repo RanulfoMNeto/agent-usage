@@ -107,6 +107,9 @@ class CLITests(unittest.TestCase):
                 '[agents.codex]\npath = "/x"\n',
                 "[widget]\nwidth = 0\n",
                 "[limits]\nrefresh_seconds = 600\n",
+                "[scheduler]\nrefresh_seconds = 0\n",
+                "[scheduler]\nrefresh_seconds = 600\n",
+                "[scheduler]\nunknown = 1\n",
             ):
                 with self.subTest(body=body):
                     path.write_text(body, encoding="utf-8")

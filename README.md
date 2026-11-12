@@ -66,8 +66,23 @@ temporary profile, makes no account queries, and removes the profile on exit.
 - **Today**, **Weekly** and **History** choose the period. Click a day to see its
   totals; click the summary below to open its chart and prompts.
 - **Settings:** visible limits, bars or rings, a usage warning, theme, style,
-  keep on top, agent connections and history folders, and export or import.
-  The **?** button explains how the numbers are measured.
+  keep on top, agent connections, history folders, per-agent window schedulers,
+  and export or import. The **?** button explains how the numbers are measured.
+- **Window scheduler:** in **Settings → Agents → Window scheduler**, one switch
+  starts an agent's short usage window automatically, early enough that the quota
+  resets during your work instead of after it. The chart shows the day the scheduler
+  expects from your history as one step per half hour (how likely you are to use the
+  agent then, so it starts where your use starts), the planned starts, and dashed lines
+  where the quota resets. Press the chart to add a start, drag one to move it or click
+  it to remove it; **Use learned times** returns to the learned plan. The summary
+  shows the next start, or why there is none: **Off**, **Learning**, **Paused** or
+  **Not needed**. The plan is relearned every day from local
+  history with zero token usage: three forecasters (weekly rhythm, usual routine and
+  recent days) are weighted by how well each predicted every past day, so a new routine
+  takes over within a few days, and start times are chosen by simulating the window
+  chain on the plausible days ahead. Starts only run while the app is running, no
+  window is active and the weekly limit is not reached, in an isolated ephemeral
+  session with tools disabled.
 
 The widget's height follows its content. Preferences persist locally and never
 affect collection.
@@ -146,6 +161,9 @@ history = "/absolute/path/to/history"   # instead of the default directory
 [limits]
 refresh_seconds = 60
 
+[scheduler]
+refresh_seconds = 15
+
 [integrations]
 windows_shortcut = false                # stop updating the Start menu shortcut
 ```
@@ -178,7 +196,8 @@ from [base.py](usage/agents/base.py); nothing else in the app names a specific a
    and `login` (`"terminal"` or `"browser"` with `login_hosts`).
 2. Implement `default_history`, `parse` (one native event into prompt and call
    records from [records.py](usage/records.py)), `read_limits` (normalized windows
-   from the native client), `demo_session`, and, when needed, `history_files`,
+   from the native client), `activate_window` (minimal ephemeral turn to open a
+   usage window), `demo_session`, and, when needed, `history_files`,
    `install_directories` and `extension_binary`.
 3. Register an instance in [usage/agents/\_\_init\_\_.py](usage/agents/__init__.py).
 4. Add `usage/static/assets/agents/<id>.svg`. It is also the top bar icon, which

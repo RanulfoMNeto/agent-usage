@@ -24,7 +24,7 @@
             <p id="connection-info" class="status-info"></p>
           </details>
           <button id="settings-open" class="icon-button" aria-label="Settings" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2.1-1.3.8-2.1-.5L3 9.6l1.5 1.6v1.6L3 14.4l2.5 4.2 2.1-.5 1.3.8.6 2.1h5l.6-2.1 1.3-.8 2.1.5 2.5-4.2-1.5-1.6v-1.6L21 9.6l-2.5-4.2-2.1.5-1.3-.8-.6-2.1z"/><circle cx="12" cy="12" r="3"/></svg></button>
-          <button id="widget-close" class="icon-button" aria-label="Quit" title="Quit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+          <button id="widget-close" class="icon-button" aria-label="Hide" title="Hide"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
       </header>
       <section id="limits-section" aria-label="Account limits" hidden>
@@ -78,7 +78,7 @@
   <div id="heatmap-tooltip" class="heatmap-tooltip" role="tooltip" hidden></div>
   <dialog id="settings" aria-labelledby="settings-title">
     <div class="panel-content">
-      <form method="dialog" class="dialog-header">
+      <form method="dialog" class="dialog-header" title="Drag to move">
         <h2 id="settings-title">Settings</h2>
         <div class="dialog-actions">
           <button id="help-toggle" type="button" class="icon-button" aria-label="About the numbers" aria-expanded="false" aria-controls="help"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.6v.6M12 17v.1"/></svg></button>
@@ -90,6 +90,7 @@
         <li>Tokens are recorded input and output, including cached input. Missing measurements are left out.</li>
         <li>Estimated cost uses standard API prices, not your subscription billing.</li>
         <li>Weekly follows each agent's current reset window. Shades compare recorded tokens.</li>
+        <li>Window scheduler relearns your usage every day from local history, with zero token usage, and starts a window only when that is expected to help.</li>
         <li>History stays on this computer. Conversation text is never stored.</li>
       </ul>
       <div id="visible-limits" class="setting-row" hidden><span>Limits</span><div id="limit-options" class="limit-options" role="group" aria-label="Visible limits"></div></div>

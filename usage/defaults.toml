@@ -14,6 +14,10 @@ refresh_seconds = 60
 timeout_seconds = 10
 stale_seconds = 300
 
+[scheduler]
+# Local window scheduler check cadence; monitoring and smart analysis use zero tokens.
+refresh_seconds = 15
+
 # Optional per-agent overrides, keyed by agent ID (README › Supported agents):
 # [agents.<id>]
 # command = ["/absolute/path/to/agent"]

@@ -42,6 +42,8 @@ class LimitTests(unittest.TestCase):
                 icon = Path("usage/static/assets/agents") / f"{agent.id}.svg"
                 self.assertTrue(icon.is_file(), icon)
                 self.assertTrue(agent.default_history().is_absolute())
+                self.assertGreater(agent.window_minutes, 0)
+                self.assertTrue(callable(agent.activate_window))
         self.assertEqual(len({agent.namespace for agent in AGENTS.values()}), len(AGENTS))
 
     def test_disconnected_agents_never_query_accounts(self):
@@ -311,3 +313,145 @@ time.sleep(30)
             with self.assertRaises(TimeoutError):
                 asyncio.run(Codex().read_limits([sys.executable, str(script), "hang"], 0.2))
             self.assertIsNotNone(processes[-1].returncode)
+
+    def test_claude_and_codex_activate_window_minimally_and_stop_on_guards_or_errors(self):
+        processes, tracking = tracked(self)
+        with tempfile.TemporaryDirectory() as directory, tracking:
+            claude_script = Path(directory) / "claude_activate.py"
+            claude_script.write_text("""import json, os, sys, time
+assert not os.listdir('.')
+assert '--safe-mode' in sys.argv and '--no-session-persistence' in sys.argv
+mode = sys.argv[1]
+turns = 0
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg['type'] == 'control_request':
+        req_id = msg['request_id']
+        kind = msg['request']['subtype']
+        resp = {'subtype': 'success', 'request_id': req_id}
+        if kind == 'initialize':
+            resp['response'] = {'account': {'tokenSource': 'none'} if mode == 'signed-out' else {'email': 'PRIVATE'}}
+        elif kind == 'get_usage':
+            five = 15 if mode == 'active' or turns > 0 else 0
+            seven = 100 if mode == 'exhausted' else 25
+            resp['response'] = {
+                'rate_limits_available': mode != 'api-key',
+                'rate_limits': {
+                    'five_hour': {'utilization': five, 'resets_at': '2099-01-01T05:00:00Z'},
+                    'seven_day': {'utilization': seven, 'resets_at': '2099-01-07T00:00:00Z'},
+                },
+            }
+        print(json.dumps({'type': 'control_response', 'response': resp}), flush=True)
+    elif msg['type'] == 'user':
+        assert mode not in ('active', 'exhausted'), 'Should not send user turn when guarded'
+        assert msg['message']['content'] == '.'
+        turns += 1
+        if mode == 'hang':
+            time.sleep(30)
+        if mode == 'error':
+            print(json.dumps({'type': 'result', 'is_error': True}), flush=True)
+        else:
+            print(json.dumps({'type': 'assistant', 'message': {'id': 'm1'}}), flush=True)
+            print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
+""")
+            ok = asyncio.run(
+                Claude().activate_window([sys.executable, str(claude_script), "ok"], 5)
+            )
+            self.assertTrue(ok["activated"])
+            self.assertEqual(ok["reason"], "activated")
+            self.assertEqual(ok["windows"][0]["used_percent"], 15)
+            self.assertIsNotNone(processes[-1].returncode)
+
+            active = asyncio.run(
+                Claude().activate_window([sys.executable, str(claude_script), "active"], 5)
+            )
+            self.assertFalse(active["activated"])
+            self.assertEqual(active["reason"], "already_active")
+            self.assertIsNotNone(processes[-1].returncode)
+
+            exhausted = asyncio.run(
+                Claude().activate_window([sys.executable, str(claude_script), "exhausted"], 5)
+            )
+            self.assertFalse(exhausted["activated"])
+            self.assertEqual(exhausted["reason"], "weekly_exhausted")
+            self.assertIsNotNone(processes[-1].returncode)
+
+            for mode, error in (
+                ("signed-out", AgentUnavailable),
+                ("api-key", AgentUnavailable),
+                ("error", RuntimeError),
+                ("hang", TimeoutError),
+            ):
+                with self.assertRaises(error):
+                    asyncio.run(
+                        Claude().activate_window([sys.executable, str(claude_script), mode], 0.3)
+                    )
+                self.assertIsNotNone(processes[-1].returncode)
+
+            codex_script = Path(directory) / "codex_activate.py"
+            codex_script.write_text("""import json, os, sys, time
+assert not os.listdir('.')
+assert sys.argv[2] == 'app-server'
+mode = sys.argv[1]
+turns = 0
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get('method')
+    req_id = msg.get('id')
+    if method == 'initialize':
+        print(json.dumps({'id': req_id, 'result': {}}), flush=True)
+    elif method == 'initialized':
+        continue
+    elif method == 'account/read':
+        acc = None if mode == 'signed-out' else {'type': 'apiKey'} if mode == 'api-key' else {'type': 'chatgpt'}
+        print(json.dumps({'id': req_id, 'result': {'account': acc, 'requiresOpenaiAuth': True}}), flush=True)
+    elif method == 'account/rateLimits/read':
+        used = 10 if mode == 'active' or turns > 0 else 0
+        weekly = 100 if mode == 'exhausted' else 20
+        print(json.dumps({'id': req_id, 'result': {'rateLimits': {
+            'primary': {'usedPercent': used, 'windowDurationMins': 300, 'resetsAt': 4102444800},
+            'secondary': {'usedPercent': weekly, 'windowDurationMins': 10080, 'resetsAt': 4102963200},
+        }}}), flush=True)
+    elif method == 'thread/start':
+        assert mode not in ('active', 'exhausted')
+        assert msg['params']['ephemeral'] is True and msg['params']['sandbox'] == 'read-only'
+        print(json.dumps({'id': req_id, 'result': {'thread': {'id': 't1'}}}), flush=True)
+    elif method == 'turn/start':
+        assert msg['params']['input'] == [{'type': 'text', 'text': '.'}]
+        turns += 1
+        print(json.dumps({'id': req_id, 'result': {}}), flush=True)
+        if mode == 'hang':
+            time.sleep(30)
+        status = 'failed' if mode == 'error' else 'completed'
+        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'status': status}}}), flush=True)
+""")
+            codex_ok = asyncio.run(
+                Codex().activate_window([sys.executable, str(codex_script), "ok"], 5)
+            )
+            self.assertTrue(codex_ok["activated"])
+            self.assertEqual(codex_ok["windows"][0]["used_percent"], 10)
+            self.assertIsNotNone(processes[-1].returncode)
+
+            codex_active = asyncio.run(
+                Codex().activate_window([sys.executable, str(codex_script), "active"], 5)
+            )
+            self.assertFalse(codex_active["activated"])
+            self.assertEqual(codex_active["reason"], "already_active")
+
+            codex_exhausted = asyncio.run(
+                Codex().activate_window([sys.executable, str(codex_script), "exhausted"], 5)
+            )
+            self.assertFalse(codex_exhausted["activated"])
+            self.assertEqual(codex_exhausted["reason"], "weekly_exhausted")
+
+            for mode, error in (
+                ("signed-out", AgentUnavailable),
+                ("api-key", AgentUnavailable),
+                ("error", RuntimeError),
+                ("hang", TimeoutError),
+            ):
+                with self.assertRaises(error):
+                    asyncio.run(
+                        Codex().activate_window([sys.executable, str(codex_script), mode], 0.3)
+                    )
+                self.assertIsNotNone(processes[-1].returncode)
