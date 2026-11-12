@@ -29,7 +29,7 @@ packages = ["usage"]
 include = ["/usage", "/tests", "/scripts", "/pyproject.toml", "/README.md", "/LICENSE", "/uv.lock", "/.github/assets"]
 
 [tool.ruff]
-required-version = "==0.16.8"
+required-version = "==0.17.3"
 target-version = "py312"
 line-length = 100
 
