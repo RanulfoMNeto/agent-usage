@@ -70,16 +70,21 @@ temporary profile, makes no account queries, and removes the profile on exit.
   and export or import. The **?** button explains how the numbers are measured.
 - **Window scheduler:** in **Settings → Agents → Window scheduler**, one switch
   starts an agent's short usage window automatically, early enough that the quota
-  resets during your work instead of after it. The chart shows the day the scheduler
-  expects from your history as one step per half hour (how likely you are to use the
-  agent then, so it starts where your use starts), the planned starts, and dashed lines
-  where the quota resets. Press the chart to add a start, drag one to move it or click
-  it to remove it; **Use learned times** returns to the learned plan. The summary
-  shows the next start, or why there is none: **Off**, **Learning**, **Paused** or
-  **Not needed**. The plan is relearned every day from local
+  resets during your work instead of after it. Each day has one start; from it until
+  midnight, a new window starts as soon as the previous one resets. A start missed
+  while the app was closed runs as soon as the app runs that day, and a start that
+  finds a window already open waits for its reset. A missed start never carries into
+  the next day. The chart shows how likely you are to use the agent in each half hour
+  (learned from your history), the day's real windows (the open one in the agent's
+  color), the planned ones outlined from the next start to midnight, the day's start
+  (hollow when it was missed or deferred), now, and dots where the scheduler acted;
+  hover it for details. Press the chart to set the start, drag it to
+  move it or click it to return to the learned one; **Use learned times** does the
+  same. The summary shows the next start, or why there is none: **Off**, **Learning**,
+  **Paused** or **Not needed**. The plan is relearned every day from local
   history with zero token usage: three forecasters (weekly rhythm, usual routine and
   recent days) are weighted by how well each predicted every past day, so a new routine
-  takes over within a few days, and start times are chosen by simulating the window
+  takes over within a few days, and the start is chosen by simulating that window
   chain on the plausible days ahead. Starts only run while the app is running, no
   window is active and the weekly limit is not reached, in an isolated ephemeral
   session with tools disabled.
