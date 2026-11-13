@@ -16,10 +16,12 @@ from usage.scheduler import (
     BACKOFF_SECONDS,
     DEFAULT_SCHEDULE,
     FORECASTERS,
+    LOOKAHEAD_DAYS,
     SLOT_MINUTES,
     Scheduler,
     UsageModel,
     availability,
+    first_window,
     stored_schedule,
     validate_schedule,
 )
@@ -163,9 +165,12 @@ class SchedulerTests(unittest.TestCase):
         self.assertLess(starts[0], 9 * 60)
         self.assertTrue(9 * 60 < first_reset < second_reset < 17 * 60)
 
+        # A day without expected use still gets a start, though it gains nothing.
         saturday = TODAY + timedelta(days=2)
         self.assertLess(model.forecast(saturday)[1], 0.2)
-        self.assertEqual(model.plan(saturday), ([], 0.0))
+        starts, gain = model.plan(saturday)
+        self.assertEqual(len(starts), 1)
+        self.assertLess(gain, 0)
 
     def test_a_changed_routine_takes_over_within_days_but_one_odd_day_does_not(self):
         now = local_ts(TODAY, 1)
@@ -195,28 +200,33 @@ class SchedulerTests(unittest.TestCase):
 
         settled = UsageModel(switched(8), now, 300)
         starts, _ = settled.plan(TODAY)
-        self.assertTrue(starts)
-        self.assertTrue(all(start >= 8 * 60 for start in starts))
-        self.assertTrue(any(13 * 60 < start + 300 < 18 * 60 for start in starts))
+        self.assertEqual(len(starts), 1)
+        # The new routine gets a reset inside it.
+        resets = [starts[0] + k * 300 for k in (1, 2, 3)]
+        self.assertTrue(any(13 * 60 < reset < 18 * 60 for reset in resets))
 
-        # While away nothing is started; a couple of days back restore the usual plan.
+        # While away the day's start gains little; a couple of days back restore the usual plan.
         away = UsageModel(history(lambda d, age: [(9, 17)] if age > 10 else [], 90), now, 300)
-        self.assertEqual(away.plan(TODAY)[0], [])
+        starts, gain = away.plan(TODAY)
+        self.assertEqual(len(starts), 1)
+        self.assertLess(gain, 0.05)
         back = UsageModel(
             history(lambda d, age: [(9, 17)] if d.weekday() < 5 and not 2 < age <= 12 else [], 90),
             now,
             300,
         )
-        self.assertEqual(len(back.plan(TODAY)[0]), 1)
+        starts, gain = back.plan(TODAY)
+        self.assertEqual(len(starts), 1)
+        self.assertGreater(gain, 0.5)
 
-    def test_light_usage_and_times_the_app_is_off_need_no_starts(self):
+    def test_a_short_session_gets_a_reset_inside_it_at_a_time_the_app_usually_runs(self):
         now = local_ts(TODAY, 1)
-        light = history(weekdays((10, 11)))
-        self.assertTrue(UsageModel(light, now, 300).plan(TODAY)[0])
-        # Calibrated against reported usage, these sessions use a fraction of a window.
-        calibrated = UsageModel(light, now, 300, capacity=60.0)
-        self.assertTrue(calibrated.calibrated)
-        self.assertEqual(calibrated.plan(TODAY)[0], [])
+        # An hour a day uses a fraction of any quota, yet a reset inside it doubles the quota
+        # available while working: the most usage the limit allows.
+        starts, gain = UsageModel(history(weekdays((10, 11))), now, 300).plan(TODAY)
+        self.assertEqual(len(starts), 1)
+        self.assertGreater(gain, 0)
+        self.assertTrue(10 * 60 - 30 <= starts[0] + 300 < 11 * 60)
 
         self.assertEqual(availability({}, TODAY), [1.0] * 48)
         recent = {(TODAY - timedelta(days=1)).isoformat(): 1}
@@ -228,9 +238,41 @@ class SchedulerTests(unittest.TestCase):
         self.assertGreater(shares[slot(10)], 0.9)
         model = UsageModel(history(weekdays((9, 17))), now, 300, online=online)
         self.assertTrue(all(start >= 8 * 60 for start in model.plan(TODAY)[0]))
+        # When no time is usual for the app, any time may start the day.
+        scattered = {
+            (TODAY - timedelta(days=age)).isoformat(): 1 << (age * 7 % 48) for age in range(1, 15)
+        }
+        model = UsageModel(history(weekdays((9, 17))), now, 300, online=scattered)
+        self.assertFalse(any(model.allowed))
+        self.assertEqual(len(model.plan(TODAY)[0]), 1)
 
-    def test_planned_starts_run_once_only_when_enabled_and_custom_times_follow_usage_days(self):
-        now = local_ts(TODAY, 5)
+    def test_a_start_is_planned_every_day_even_when_none_is_expected_to_help(self):
+        # One prompt a day fits a single window wherever windows start: no start gains anything.
+        rows = [
+            {"agent": "claude", "start": local_ts(day, 10, 5), "tokens": 1000}
+            for day in (TODAY - timedelta(days=age) for age in range(1, 64))
+            if day.weekday() < 5
+        ]
+        now = local_ts(TODAY, 1)
+        model = UsageModel(rows, now, 300)
+        for offset in range(LOOKAHEAD_DAYS):
+            starts, gain = model.plan(TODAY + timedelta(days=offset))
+            self.assertEqual(len(starts), 1)
+            self.assertLess(gain, 0)
+
+        scheduler = self.scheduler(rows, ClockLimits())
+        scheduler.set_schedule("claude", {"enabled": True})
+        snap = scheduler.snapshot(now=now)["agents"]["claude"]
+        self.assertEqual(snap["status"], "scheduled")
+        plan = snap["plan"]
+        self.assertEqual(
+            (plan["date"], plan["source"], len(plan["starts"])), ("2026-11-12", "learned", 1)
+        )
+        start = local_ts(TODAY, *map(int, plan["starts"][0].split(":")))
+        self.assertEqual(snap["next_activation_at"], start)
+
+    def test_planned_starts_run_once_only_when_enabled_and_custom_times_apply_every_day(self):
+        now = local_ts(TODAY, 3)
         idle = [dict(bucket=None, minutes=10080, used_percent=20, resets_at=FAR)]
 
         def started(at):
@@ -285,7 +327,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(following["next_activation_at"], reset)
             self.assertEqual(scheduler.wake_at, reset)
 
-            # Fixed times apply on days the agent is used: Friday 14:00, then Monday, not Saturday.
+            # Fixed times apply every day, used or not: Friday 14:00, then Saturday 14:00.
             scheduler.set_schedule("claude", {"enabled": True, "times": ["14:00"]})
             two = local_ts(TODAY, 14)
             snap = scheduler.snapshot(now=two - 600)["agents"]["claude"]
@@ -305,7 +347,7 @@ class SchedulerTests(unittest.TestCase):
                 scheduler.snapshot(now=local_ts(TODAY + timedelta(days=2), 10))["agents"]["claude"][
                     "next_activation_at"
                 ],
-                local_ts(TODAY + timedelta(days=4), 14),
+                local_ts(TODAY + timedelta(days=2), 14),
             )
 
             # The app records when it is running, for later plans.
@@ -350,7 +392,7 @@ class SchedulerTests(unittest.TestCase):
                 self.assertEqual(plan["start_status"], "missed" if same_day else "pending")
         self.assertEqual(len(limits.started), 3)
 
-    def test_a_start_waits_for_an_open_window_then_windows_follow_until_midnight(self):
+    def test_a_window_opened_before_the_start_begins_the_chain_until_midnight(self):
         # The user's own prompt at 06:00 opened a window that is still open at 09:30.
         own = dict(bucket=None, minutes=300, used_percent=20, resets_at=local_ts(TODAY, 11))
         limits = ClockLimits(own)
@@ -390,7 +432,8 @@ class SchedulerTests(unittest.TestCase):
                     plan["events"],
                     [{"at": 570, "status": "skipped_active"}, {"at": 660, "status": "activated"}],
                 )
-                self.assertEqual((plan["start_status"], plan["next"]), ("deferred", 960))
+                # The 06:00 window began the day's chain before its 09:30 start.
+                self.assertEqual((plan["start_status"], plan["next"]), ("early", 960))
         self.assertEqual(limits.started, [local_ts(TODAY, hour) for hour in (11, 16, 21)])
 
         # The 21:00 window resets at 02:00 and shows on the next day's chart up to then.
@@ -408,6 +451,77 @@ class SchedulerTests(unittest.TestCase):
         )
         plan = scheduler.snapshot(now=local_ts(tomorrow, 9, 31))["agents"]["claude"]["plan"]
         self.assertEqual((plan["start_status"], plan["next"]), ("ran", 870))
+
+    def test_a_window_from_another_device_is_renewed_from_its_reset_until_midnight(self):
+        limits = ClockLimits()
+        scheduler = self.scheduler([], limits)
+        scheduler.set_schedule("claude", {"enabled": True, "times": ["20:00"]})
+        tomorrow = TODAY + timedelta(days=1)
+        self.assertEqual(scheduler.tick(now=local_ts(TODAY, 12)), [])
+        self.assertEqual(scheduler.wake_at, local_ts(TODAY, 20))
+
+        # At 12:30 a window opens elsewhere: the agent reports it, no local prompt does.
+        # The scheduler notices it on its own, with nothing showing the widget.
+        reset = local_ts(TODAY, 17, 30)
+        limits.windows.append(dict(bucket=None, minutes=300, used_percent=20, resets_at=reset))
+        events = scheduler.tick(now=local_ts(TODAY, 12, 31))
+        self.assertEqual([e["status"] for e in events], ["skipped_active"])
+        self.assertEqual(scheduler.wake_at, reset)
+        snap = scheduler.snapshot(now=local_ts(TODAY, 12, 32))["agents"]["claude"]
+        self.assertEqual((snap["status"], snap["next_activation_at"]), ("scheduled", reset))
+        plan = snap["plan"]
+        self.assertEqual(plan["starts"], ["20:00"])
+        self.assertEqual((plan["start_status"], plan["next"]), ("early", 1050))
+        self.assertEqual(plan["windows"], [{"start": 750, "end": 1050, "by": "you", "open": True}])
+
+        # From its reset, windows are renewed until midnight; the last one crosses it.
+        for hour, minute, wake in ((17, 30, local_ts(TODAY, 22, 30)), (22, 30, None)):
+            events = scheduler.tick(now=local_ts(TODAY, hour, minute))
+            self.assertEqual([e["status"] for e in events], ["activated"])
+            self.assertEqual(scheduler.wake_at, wake or local_ts(tomorrow, 20))
+        self.assertEqual(limits.started, [reset, local_ts(TODAY, 22, 30)])
+
+        # A window from the day before never begins the next day's chain.
+        self.assertEqual(scheduler.tick(now=local_ts(tomorrow, 3, 30)), [])
+        self.assertEqual(scheduler.wake_at, local_ts(tomorrow, 20))
+        plan = scheduler.snapshot(now=local_ts(tomorrow, 3, 31))["agents"]["claude"]["plan"]
+        self.assertEqual((plan["start_status"], plan["next"]), ("pending", 1200))
+
+    def test_a_window_that_ended_while_the_app_was_closed_still_begins_the_chain(self):
+        def prompts(*moments):
+            return [{"agent": "claude", "start": local_ts(*m), "tokens": 1000} for m in moments]
+
+        yesterday = TODAY - timedelta(days=1)
+        seconds = 300 * 60
+        nine = local_ts(TODAY, 9)
+        # Prompts after a reset open a window; ones inside a window from the day before do not.
+        starts = [r["start"] for r in prompts((yesterday, 22), (TODAY, 0, 30), (TODAY, 3, 30))]
+        self.assertEqual(first_window([], starts[:2], TODAY, nine, seconds), None)
+        self.assertEqual(first_window([], starts, TODAY, nine, seconds), starts[2])
+        known = [{"start": local_ts(yesterday, 21), "end": local_ts(TODAY, 2)}]
+        self.assertEqual(first_window(known, starts[1:2], TODAY, nine, seconds), None)
+        known.append({"start": local_ts(TODAY, 6), "end": local_ts(TODAY, 11)})
+        self.assertEqual(first_window(known, starts, TODAY, nine, seconds), starts[2])
+        # Nothing counts before it happens.
+        self.assertEqual(first_window(known, starts, TODAY, local_ts(TODAY, 3), seconds), None)
+
+        # The user worked from 01:00 to 01:20 with the app closed; it opens at 09:00.
+        limits = ClockLimits()
+        scheduler = self.scheduler(prompts((TODAY, 1), (TODAY, 1, 20)), limits)
+        scheduler.set_schedule("claude", {"enabled": True, "times": ["20:00"]})
+        self.assertEqual([e["status"] for e in scheduler.tick(now=nine)], ["activated"])
+        self.assertEqual(scheduler.wake_at, local_ts(TODAY, 14))
+
+    def test_a_window_from_the_day_before_defers_the_start(self):
+        own = dict(bucket=None, minutes=300, used_percent=20, resets_at=local_ts(TODAY, 3))
+        limits = ClockLimits(own)
+        scheduler = self.scheduler([], limits)
+        scheduler.set_schedule("claude", {"enabled": True, "times": ["01:00"]})
+        events = scheduler.tick(now=local_ts(TODAY, 1))
+        self.assertEqual([e["status"] for e in events], ["skipped_active"])
+        plan = scheduler.snapshot(now=local_ts(TODAY, 1, 1))["agents"]["claude"]["plan"]
+        self.assertEqual((plan["start_status"], plan["next"]), ("deferred", 180))
+        self.assertEqual(scheduler.tick(now=local_ts(TODAY, 3))[0]["status"], "activated")
 
     def test_a_start_missed_yesterday_does_not_run_the_next_day(self):
         limits = ClockLimits()
@@ -500,27 +614,11 @@ class SchedulerTests(unittest.TestCase):
                 self.assertEqual(result["reason"], expected)
                 self.assertNotIn("secret", json.dumps(result))
 
-    def test_capacity_is_calibrated_from_reported_usage_for_the_next_day(self):
-        now = local_ts(TODAY, 15)
-        rows = history(weekdays((9, 17))) + [
-            {"agent": "claude", "start": now - 3600 + minute * 60, "tokens": None}
-            for minute in range(0, 60, 6)
-        ]
-        limits = {
-            "agents": [
-                {
-                    "id": "claude",
-                    "windows": [{"minutes": 300, "used_percent": 50, "resets_at": now + 7200}],
-                }
-            ]
-        }
-        scheduler = self.scheduler(rows)
-        snap = scheduler.snapshot(now=now, limits_snapshot=limits)["agents"]["claude"]
-        self.assertFalse(snap["model"]["calibrated"])
-        self.assertEqual(list(scheduler.state["claude"]["capacity"].values()), [20.0])
-        tomorrow = scheduler.snapshot(now=now + 86400, limits_snapshot={"agents": []})
-        self.assertTrue(tomorrow["agents"]["claude"]["model"]["calibrated"])
-        self.assertEqual(scheduler.models["claude"][1].capacity, 20.0)
+    def test_capacity_samples_from_earlier_versions_are_dropped(self):
+        saved = {"claude": {"capacity": {"2990000": 20.0}, "active_until": 5.0}}
+        self.usage.store("scheduler_state", {"state": saved})
+        scheduler = Scheduler(self.usage, self.limits, self.config)
+        self.assertEqual(scheduler.state["claude"], {"active_until": 5.0})
 
     def test_demo_activation_uses_no_agent_process(self):
         now = local_ts(TODAY, 10)

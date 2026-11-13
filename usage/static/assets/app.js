@@ -578,11 +578,10 @@ function schedulerStatus(entry) {
   return {
     paused: ['Paused', PAUSED[entry?.reason] || ''],
     learning: ['Learning', 'Needs a few days of history'],
-    idle: ['Not needed', 'No start is expected to help in the coming days'],
   }[status] || ['Off', ''];
 }
 
-const START_STATES = { ran: 'on time', deferred: 'deferred', missed: 'missed', failed: 'failed', skipped: 'skipped' };
+const START_STATES = { ran: 'on time', early: 'chain began earlier', deferred: 'deferred', missed: 'missed', failed: 'failed', skipped: 'skipped' };
 const EVENT_LABELS = {
   activated: 'started', skipped_active: 'deferred', failed: 'failed', skipped_exhausted: 'limit reached',
   skipped_unavailable: 'unavailable', skipped_disconnected: 'disconnected',
@@ -661,9 +660,10 @@ const schedulerOverlay = {
       ctx.fillStyle = overlay.text; ctx.textAlign = right ? 'left' : 'right';
       ctx.fillText(text, right ? px + 8 : px - 8, top);
     };
-    // The day's start: filled when it ran or is ahead, hollow when it was missed or deferred.
+    // The day's start: filled when it ran, is ahead or an earlier window began the chain,
+    // hollow when it was missed or deferred.
     overlay.starts.forEach((minutes, index) => {
-      const px = at(minutes), hollow = overlay.active < 0 && START_STATES[overlay.startState] && overlay.startState !== 'ran';
+      const px = at(minutes), hollow = overlay.active < 0 && START_STATES[overlay.startState] && !['ran', 'early'].includes(overlay.startState);
       ctx.strokeStyle = hollow ? overlay.muted : overlay.marker; ctx.lineWidth = overlay.active === index ? 2 : 1.5;
       ctx.setLineDash(hollow ? [2, 2] : []);
       ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, area.bottom); ctx.stroke(); ctx.setLineDash([]);

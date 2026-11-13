@@ -3,22 +3,26 @@ enough that resets land inside the work. Deciding costs no tokens; only a start 
 
 The pipeline runs locally and is rebuilt once per day:
 
-1. Data. Prompt start times and token counts from local history, in 30-minute slots per
-   calendar day. Days without prompts are observations too.
+1. Data. Prompt start times from local history, in 30-minute slots per calendar day. Days
+   without prompts are observations too.
 2. Prediction. Three forecasters weigh past days differently: the same weekday over months
    (weekly), the same kind of day over weeks (routine) and the last few days (recent). Every
    past day scores how well each would have predicted it, and an online mixture (exponential
    weights with a fixed share) moves trust to whichever explains current behavior. A new
    routine takes over within a few days; a single odd day barely matters.
-3. Optimization. The forecast is a weighted set of plausible days. For each candidate start
-   time, the chain the scheduler runs is simulated on each plausible day and scored with a
-   saturating utility per window (a window absorbs at most its quota), minus a small cost for
-   every window the scheduler opens. The best start wins if it beats starting none.
-4. Recommendation. One start per date, limited to times the app is usually running, with the
-   window capacity calibrated against the usage percentage the agent reports.
+3. Optimization. The goal is the most usage the limit allows: every window brings a fresh
+   quota, all of it usable while working in it, so the best start makes the most windows
+   fall on work, with resets inside it rather than after it. The forecast is a weighted set
+   of plausible days. For each candidate start time, the chain the scheduler runs is
+   simulated on each plausible day and scored by the windows that hold any use, minus a small
+   cost for every window the scheduler opens. The best start wins even when it gains nothing
+   over starting none: every date gets one.
+4. Recommendation. One start per date, preferring times the app is usually running.
 5. Execution. From the day's start until midnight, whenever no window is open one is started:
    at the start itself, as soon as the app is running when the start was missed, and right
    when a window ends. A window still open at the start defers it to that window's reset.
+   A window opened earlier that day, by the user's own prompt, another device or anything
+   else, begins the chain instead: from its reset on, windows are renewed until midnight.
 """
 
 import asyncio
@@ -31,7 +35,6 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from datetime import time as clock
 from pathlib import Path
-from statistics import median
 
 from .agents import AGENTS, AgentUnavailable
 from .records import number
@@ -50,8 +53,6 @@ PRIOR_DAYS = 0.5
 ACTIVATION_COST = 0.02
 MAX_SCENARIOS = 60
 ONLINE_DAYS = 28
-CAPACITY_SAMPLES = 30
-OBSERVE_SECONDS = 60
 BACKOFF_SECONDS = 300
 SETTLE_SECONDS = 30
 LOOKAHEAD_DAYS = 9
@@ -112,14 +113,8 @@ def _clock(minutes):
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def demand(row):
-    """Quota pressure of one prompt: heavy prompts weigh more without cache reads dominating."""
-    tokens = number(row.get("tokens"))
-    return 1.0 + math.log1p(tokens / 10000.0) if tokens else 1.0
-
-
 def usage_days(rows, now, lookback=LOOKBACK_DAYS):
-    """Complete local days before today as (date, {slot: demand}), days without use included."""
+    """Complete local days before today as (date, {slot: prompts}), days without use included."""
     today = _local(now).date()
     buckets = {}
     for row in rows or ():
@@ -131,7 +126,7 @@ def usage_days(rows, now, lookback=LOOKBACK_DAYS):
             continue
         slot = (moment.hour * 60 + moment.minute) // SLOT_MINUTES
         slots = buckets.setdefault(moment.date(), {})
-        slots[slot] = slots.get(slot, 0.0) + demand(row)
+        slots[slot] = slots.get(slot, 0) + 1
     if not buckets:
         return []
     first = min(buckets)
@@ -196,22 +191,6 @@ def learn(days):
     return trust
 
 
-def _natural_loads(days, span):
-    """Demand per window when windows only start with the user's own prompts."""
-    loads = []
-    for _, slots in days:
-        end, load = -1, 0.0
-        for slot in sorted(slots):
-            if slot >= end:
-                if load:
-                    loads.append(load)
-                end, load = slot + span, 0.0
-            load += slots[slot]
-        if load:
-            loads.append(load)
-    return loads
-
-
 def availability(online, today):
     """Recency-weighted share of recent days the app was running in each slot."""
     tracked = []
@@ -236,58 +215,57 @@ def availability(online, today):
     return [(totals[slot] + 1.0) / (mass + 1.0) for slot in range(SLOTS)]
 
 
-def _utility(demands, first, span, capacity):
-    """Exact window chain on one day: saturating utility and windows the scheduler opened.
+def _utility(prompts, first, span):
+    """Exact window chain on one day: windows that hold any use, each a fresh quota usable in
+    full while working in it, and windows the scheduler opened.
 
-    Before the day's first start only prompts open windows. From it until midnight the
-    scheduler opens one whenever none is open: at the start, or when the open one resets.
+    Until the chain begins only prompts open windows. It begins at the day's start, or with the
+    first window when one opens earlier; from then until midnight the scheduler opens one
+    whenever none is open.
     """
-    total, fired, end, load = 0.0, 0, -1, 0.0
+    used, fired, end, busy = 0, 0, -1, False
     for slot in range(SLOTS):
-        amount = demands.get(slot, 0.0)
-        chained = first is not None and slot >= first
-        if slot >= end and (chained or amount):
-            total += 1.0 - math.exp(-load / capacity)
-            end, load = slot + span, 0.0
+        chained = first is not None and (slot >= first or end >= 0)
+        if slot >= end and (chained or slot in prompts):
+            used += busy
+            end, busy = slot + span, False
             fired += chained
-        load += amount
-    return total + 1.0 - math.exp(-load / capacity), fired
+        busy = busy or slot in prompts
+    return used + busy, fired
 
 
-def optimize(scenarios, span, capacity, allowed):
-    """The day's start slot maximizing expected utility over plausible days, and its gain."""
+def optimize(scenarios, span, allowed):
+    """The day's start slot making the most windows fall on work over plausible days, and its
+    gain over starting none, which may be negative: a day always gets a start, at a time the
+    app is usually running when there is one, and the earliest of equally good slots."""
     days = [(weight, dict(events)) for weight, events in scenarios]
 
     def score(first):
         value = 0.0
-        for weight, demands in days:
-            utility, fired = _utility(demands, first, span, capacity)
-            value += weight * (utility - ACTIVATION_COST * fired)
+        for weight, prompts in days:
+            used, fired = _utility(prompts, first, span)
+            value += weight * (used - ACTIVATION_COST * fired)
         return value
 
-    base = score(None)
-    chosen, best = [], base
-    for slot in range(SLOTS):
-        if allowed[slot]:
-            value = score(slot)
-            if value > best + 1e-9:
-                chosen, best = [slot], value
-    return chosen, best - base
+    candidates = [slot for slot in range(SLOTS) if allowed[slot]] or range(SLOTS)
+    chosen, best = None, -math.inf
+    for slot in candidates:
+        value = score(slot)
+        if value > best + 1e-9:
+            chosen, best = slot, value
+    return [chosen], best - score(None)
 
 
 class UsageModel:
     """An agent's learned usage pattern as of one day, with plans computed per date on demand."""
 
-    def __init__(self, rows, now, window_minutes, capacity=None, online=None):
+    def __init__(self, rows, now, window_minutes, online=None):
         self.today = _local(now).date()
         self.window_minutes = window_minutes
         self.span = max(1, round(window_minutes / SLOT_MINUTES))
         self.days = usage_days(rows, now)
         self.active_days = sum(1 for _, slots in self.days if slots)
         self.trust = learn(self.days)
-        loads = _natural_loads(self.days, self.span)
-        self.calibrated = capacity is not None
-        self.capacity = capacity or (median(loads) if loads else 1.0)
         self.allowed = [share >= 0.5 for share in availability(online, self.today)]
         counts = [0] * SLOTS
         for _, slots in self.days:
@@ -325,25 +303,22 @@ class UsageModel:
         return self._forecasts[target]
 
     def plan(self, target):
-        """Learned start minute for a date (none or one) and its expected utility gain."""
+        """Learned start minute for a date (one once the model is ready, none while learning)
+        and its expected utility gain, which may be negative."""
         if target not in self._plans:
             starts, gain = [], 0.0
             if self.ready:
-                slots, gain = optimize(
-                    self.forecast(target)[2], self.span, self.capacity, self.allowed
-                )
+                slots, gain = optimize(self.forecast(target)[2], self.span, self.allowed)
                 starts = [slot * SLOT_MINUTES for slot in slots]
             self._plans[target] = (starts, gain)
         return self._plans[target]
 
     def start(self, schedule, target):
-        """Minute a date's chain starts: learned, or the earliest fixed time on days the agent
-        is usually used; None when nothing starts that day."""
+        """Minute a date's chain starts: learned, or the earliest fixed time, every day; None
+        only while a learned plan is still learning."""
         if schedule["times"] is None:
             starts = self.plan(target)[0]
             return starts[0] if starts else None
-        if self.ready and self.forecast(target)[1] < 0.5:
-            return None
         return _minutes(schedule["times"][0])
 
 
@@ -356,8 +331,32 @@ def _windows(saved):
     ]
 
 
-def _start_status(start_at, events, now):
-    """How a day's start went: pending, ran, deferred, failed, skipped or missed."""
+def first_window(windows, prompts, day, now, seconds):
+    """When a day's first window opened, up to now; None before any.
+
+    Known windows are the ones the agent reported or the scheduler started. A prompt outside
+    every window opens one, as the agent does after a reset, so a window that opened and ended
+    while the app was not running still counts. Windows that opened the day before never do.
+    """
+    midnight = _at(day, 0)
+    known = [(w["start"], w["end"]) for w in windows if w["start"] <= now]
+    opened = [start for start, _ in known if start >= midnight]
+    end = -math.inf
+    for moment in sorted(p for p in prompts if midnight - seconds <= p <= now):
+        if moment < end or any(start <= moment < stop for start, stop in known):
+            continue
+        if moment >= midnight:
+            opened.append(moment)
+            break
+        end = moment + seconds
+    return min(opened, default=None)
+
+
+def _start_status(start_at, events, now, opened=None):
+    """How a day's start went: early when a window opened before it began the chain, otherwise
+    pending, ran, deferred, failed, skipped or missed."""
+    if opened is not None and opened < start_at:
+        return "early"
     if start_at > now:
         return "pending"
     for event in events:
@@ -436,7 +435,7 @@ class Scheduler:
         self.stop_event = threading.Event()
         self.worker = None
         self.schedules, self.state, self.history, self.online = {}, {}, [], {}
-        self.models, self.keys, self.observed = {}, {}, {}
+        self.models, self.keys = {}, {}
         self.rows_cache = None
         self.dirty = False
         self.wake_at = None
@@ -459,9 +458,14 @@ class Scheduler:
                 saved = self.usage.setting(db, "scheduler_state")
             states = saved.get("state")
             if isinstance(states, dict):
-                # Slot markers belonged to the per-start scheduler; the chain needs none.
+                # Slot markers belonged to the per-start scheduler and capacity samples to the
+                # usage calibration; plans need neither.
                 self.state = {
-                    k: {key: value for key, value in v.items() if not key.startswith("last_slot")}
+                    k: {
+                        key: value
+                        for key, value in v.items()
+                        if not key.startswith("last_slot") and key != "capacity"
+                    }
                     for k, v in states.items()
                     if k in self.agents and isinstance(v, dict)
                 }
@@ -532,49 +536,6 @@ class Scheduler:
         except Exception:
             return {}
 
-    def _capacity(self, agent_id, before):
-        """Median window capacity from windows that reset before a time; callers hold the lock."""
-        samples = (self.state.get(agent_id) or {}).get("capacity")
-        if not isinstance(samples, dict):
-            return None
-        values = [
-            v
-            for k, v in samples.items()
-            if k.isdigit() and int(k) * 600 < before and number(v) and v > 0
-        ]
-        return median(values) if values else None
-
-    def _observe(self, agent_id, entry, rows, now):
-        """Calibrate window capacity: local demand in the current window against its usage."""
-        if now - self.observed.get(agent_id, -math.inf) < OBSERVE_SECONDS:
-            return
-        self.observed[agent_id] = now
-        for window in (entry or {}).get("windows") or []:
-            minutes, used = number(window.get("minutes")), number(window.get("used_percent"))
-            resets_at = number(window.get("resets_at"))
-            if None in (minutes, used, resets_at) or minutes >= 10080 or used < 10:
-                continue
-            if resets_at <= now:
-                continue
-            opened = resets_at - minutes * 60
-            load = sum(
-                demand(row)
-                for row in rows
-                if number(row.get("start")) is not None and opened <= row["start"] <= now
-            )
-            if load <= 0:
-                continue
-            estimate = round(load * 100 / used, 3)
-            key = str(int(resets_at // 600))
-            with self.lock:
-                samples = self.state.setdefault(agent_id, {}).setdefault("capacity", {})
-                previous = samples.get(key)
-                if previous is None or abs(previous - estimate) > 0.05 * previous:
-                    samples[key] = estimate
-                    for old in sorted(samples, key=int)[:-CAPACITY_SAMPLES]:
-                        samples.pop(old)
-                    self.dirty = True
-
     def _model(self, agent, rows, now):
         """The agent's model for today, rebuilt when the day or earlier history changes."""
         today = _local(now).date()
@@ -592,16 +553,13 @@ class Scheduler:
             history_key = (len(starts), max(starts, default=0.0))
             self.keys[agent.id] = ((generation, today), history_key)
         with self.lock:
-            capacity = self._capacity(agent.id, midnight)
             online = dict(self.online)
-        key = (today, history_key, capacity)
+        key = (today, history_key)
         with self.model_lock:
             cached = self.models.get(agent.id)
             if cached and cached[0] == key:
                 return cached[1]
-            model = UsageModel(
-                rows, now, int(getattr(agent, "window_minutes", 300)), capacity, online
-            )
+            model = UsageModel(rows, now, int(getattr(agent, "window_minutes", 300)), online)
             self.models[agent.id] = (key, model)
             return model
 
@@ -622,12 +580,22 @@ class Scheduler:
         return self.snapshot()
 
     @staticmethod
-    def _next_start(model, schedule, state, now, busy_until=None):
+    def _opened(agent, state, rows, now):
+        """When today's first window opened, from known windows and the agent's prompts."""
+        prompts = [row["start"] for row in rows if number(row.get("start")) is not None]
+        seconds = int(getattr(agent, "window_minutes", 300)) * 60
+        return first_window(
+            _windows(state.get("windows")), prompts, _local(now).date(), now, seconds
+        )
+
+    @staticmethod
+    def _next_start(model, schedule, state, now, busy_until=None, opened=None):
         """When the next window should start: now when one is due, or later; None without one.
 
-        Each day runs one chain from its start until midnight: a start missed while the app was
-        not running is due as soon as it runs, and a start that finds a window open waits for
-        its reset. A day's chain never carries into the next day.
+        Each day runs one chain from its start until midnight, or from today's first window
+        (opened) when it opened earlier: a start missed while the app was not running is due as
+        soon as it runs, and a start that finds a window open waits for its reset. A day's
+        chain never carries into the next day.
         """
         error_at = number(state.get("last_error_at")) or 0.0
         ready = max(
@@ -642,7 +610,10 @@ class Scheduler:
             minutes = model.start(schedule, day)
             if minutes is None:
                 continue
-            moment = max(_at(day, minutes), ready)
+            origin = _at(day, minutes)
+            if offset == 0 and opened is not None:
+                origin = min(origin, opened)
+            moment = max(origin, ready)
             if moment < _at(day + timedelta(days=1), 0):
                 return moment
         return None
@@ -818,22 +789,29 @@ class Scheduler:
         self._mark_online(now)
         triggered, upcoming = [], []
         connections = self._connections()
-        grouped = None
+        grouped = entries = None
         for agent_id, agent in self.agents.items():
             schedule = self.get_schedule(agent_id)
             if not schedule["enabled"] or connections.get(agent_id) is False:
                 continue
             grouped = self._rows() if grouped is None else grouped
-            model = self._model(agent, grouped.get(agent_id, []), now)
+            # Windows the agent reports, so one opened before the start begins the chain even
+            # while nothing shows the widget.
+            entries = self._limit_entries() if entries is None else entries
+            rows = grouped.get(agent_id, [])
+            model = self._model(agent, rows, now)
             with self.lock:
+                self._seen(agent_id, entries.get(agent_id), now)
                 state = dict(self.state.get(agent_id) or {})
-            due = self._next_start(model, schedule, state, now)
+            opened = self._opened(agent, state, rows, now)
+            due = self._next_start(model, schedule, state, now, opened=opened)
             if due is not None and due <= now:
                 source = "learned" if schedule["times"] is None else "custom"
                 triggered.append(self.activate(agent_id, source=source, now=now))
                 with self.lock:
                     state = dict(self.state.get(agent_id) or {})
-                due = self._next_start(model, schedule, state, now)
+                opened = self._opened(agent, state, rows, now)
+                due = self._next_start(model, schedule, state, now, opened=opened)
             if due is not None:
                 upcoming.append(due)
         self.wake_at = min(upcoming, default=None)
@@ -856,11 +834,16 @@ class Scheduler:
         result = {}
         for agent_id, agent in self.agents.items():
             schedule, state, rows = schedules[agent_id], states[agent_id], grouped.get(agent_id, [])
-            self._observe(agent_id, entries.get(agent_id), rows, now)
             model = self._model(agent, rows, now)
             info = window_state(agent, entries.get(agent_id), rows, state, now=now)
+            opened = self._opened(agent, state, rows, now)
             upcoming = self._next_start(
-                model, schedule, state, now, info["active_until"] if info["active"] else None
+                model,
+                schedule,
+                state,
+                now,
+                info["active_until"] if info["active"] else None,
+                opened,
             )
             shown = _local(upcoming).date() if upcoming is not None else model.today
             start = model.start(schedule, shown)
@@ -881,8 +864,6 @@ class Scheduler:
                 else "learning"
                 if schedule["times"] is None and not model.ready
                 else "scheduled"
-                if upcoming is not None
-                else "idle"
             )
             events = [item for item in history if item.get("agent") == agent_id]
             # The chart's day in wall-clock minutes; windows may start before it or end after.
@@ -920,7 +901,9 @@ class Scheduler:
                     "starts": [] if start is None else [_clock(start)],
                     "start_status": None
                     if start is None
-                    else _start_status(_at(shown, start), today, now),
+                    else _start_status(
+                        _at(shown, start), today, now, opened if shown == model.today else None
+                    ),
                     "next": minute(upcoming) if status == "scheduled" else None,
                     "windows": windows,
                     "events": [
@@ -932,7 +915,6 @@ class Scheduler:
                     "days": len(model.days),
                     "active_days": model.active_days,
                     "ready": model.ready,
-                    "calibrated": model.calibrated,
                     "trust": {
                         name: round(weight, 3) for name, weight in zip(FORECASTERS, model.trust)
                     },
@@ -971,6 +953,7 @@ __all__ = [
     "Scheduler",
     "UsageModel",
     "availability",
+    "first_window",
     "learn",
     "optimize",
     "usage_days",
