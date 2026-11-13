@@ -92,22 +92,29 @@ temporary profile, makes no account queries, and removes the profile on exit.
   The zoom persists across restarts.
 - **Window scheduler:** in **Settings → Agents → Window scheduler**, one switch
   starts an agent's short usage window automatically, early enough that the quota
-  resets during your work instead of after it. Each day has one start; from it until
-  midnight, a new window starts as soon as the previous one resets. A start missed
-  while the app was closed runs as soon as the app runs that day, and a start that
-  finds a window already open waits for its reset. A missed start never carries into
-  the next day. The chart shows how likely you are to use the agent in each half hour
+  resets during your work instead of after it. Every day has one start, even when it
+  is not expected to help, such as on days you rarely use the agent; from it until
+  midnight, a new window starts as soon as the previous one resets. A window that
+  opens earlier in the day, with your own prompt or on another device, starts that
+  chain instead: from its reset, windows are renewed the same way until midnight. A
+  start missed while the app was closed runs as soon as the app runs that day, and a
+  start that finds a window from the day before still open waits for its reset. A
+  missed start never carries into the next day. The chart shows how likely you are to use the agent in each half hour
   (learned from your history), the day's real windows (the open one in the agent's
   color), the planned ones outlined from the next start to midnight, the day's start
   (hollow when it was missed or deferred), now, and dots where the scheduler acted;
   hover it for details. Press the chart to set the start, drag it to
   move it or click it to return to the learned one; **Use learned times** does the
-  same. The summary shows the next start, or why there is none: **Off**, **Learning**,
-  **Paused** or **Not needed**. The plan is relearned every day from local
+  same. The summary shows the next start, or why there is none: **Off**, **Learning**
+  or **Paused**. The plan is relearned every day from local
   history with zero token usage: three forecasters (weekly rhythm, usual routine and
   recent days) are weighted by how well each predicted every past day, so a new routine
   takes over within a few days, and the start is chosen by simulating that window
-  chain on the plausible days ahead. Starts only run while the app is running, no
+  chain on the plausible days ahead. The goal is the most usage the limit allows:
+  each window brings a fresh quota, so the chosen start makes the most windows fall
+  on your work, however little of each one you usually use. If you work from 12:00 to
+  19:30, a start around 08:30 makes the quota reset at 13:30 and 18:30, so three
+  windows fall on your work instead of two. Starts only run while the app is running, no
   window is active and the weekly limit is not reached, in an isolated ephemeral
   session with tools disabled.
 
