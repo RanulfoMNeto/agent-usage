@@ -191,5 +191,11 @@ class PresentationTests(unittest.TestCase):
                 corner, center = image.pixelColor(0, 0), image.pixelColor(size // 2, size // 2)
                 self.assertEqual(corner.alpha(), 0)
                 self.assertGreater(center.alpha(), 0)
-        faded = badge("42", "#d97757", faded=True).pixmap(32, 32).toImage().pixelColor(4, 16)
-        self.assertLess(faded.alpha(), 160)
+
+        def opacity(icon):
+            image = icon.pixmap(32, 32).toImage()
+            return max(image.pixelColor(x, y).alpha() for x in range(32) for y in range(32))
+
+        # Outdated badges are translucent throughout, digits included, whatever the font.
+        self.assertEqual(opacity(badge("42", "#d97757")), 255)
+        self.assertLess(opacity(badge("42", "#d97757", faded=True)), 200)
