@@ -1,5 +1,8 @@
 import json
+import math
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -11,26 +14,81 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import SLOT, QCoreApplication, QEvent, QRect, QSettings, Qt, QUrl
+from PySide6.QtCore import (
+    SLOT,
+    QCoreApplication,
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    QSettings,
+    Qt,
+    QUrl,
+)
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QSystemTrayIcon,
+    QWidget,
+)
 
 from usage.agents import AGENTS
 from usage.agents.claude import Claude
 from usage.config import load_config, user_directory
 from usage.desktop import (
+    REVEAL,
     STATIC,
     TOP_BAR_HEARTBEAT,
     Bridge,
+    Launches,
     LocalOnly,
     LocalPage,
     TopBar,
     Widget,
+    instance_name,
+    reveal_running,
+    run,
 )
 from usage.history import MAX_IMPORT
 from usage.limits import Limits
+from usage.tray import FLYOUT_MARGIN, REOPEN_SECONDS
 
 WIDTH = 344
+# No overflow is not enough: shrinking also waits for the native resize.
+PANEL_FITS = """(()=>{
+    const p=$('settings').open?$('settings'):document.querySelector('.widget');
+    const r=p.getBoundingClientRect();
+    return r.width>0 && r.height>0 && r.left>=0 && r.top>=0 &&
+        r.right<=innerWidth && r.bottom<=innerHeight &&
+        Math.abs(innerHeight-(r.bottom+r.top))<=2 &&
+        p.scrollHeight<=p.clientHeight+1 &&
+        document.documentElement.scrollHeight<=innerHeight+1 &&
+        document.documentElement.scrollWidth<=innerWidth+1;
+})()"""
+# Like a real second launch, the client owns an application and its own process.
+LAUNCH_CLIENT = """
+import json, sys
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtNetwork import QLocalSocket
+from usage.desktop import reveal_running
+app = QCoreApplication([])
+name, requests = sys.argv[1], json.loads(sys.argv[2])
+def send(request):
+    socket = QLocalSocket()
+    socket.connectToServer(name)
+    socket.waitForConnected(2000)
+    socket.write(request.encode())
+    socket.waitForBytesWritten(2000)
+    socket.waitForReadyRead(500)
+    reply = bytes(socket.readAll()).decode()
+    socket.abort()
+    return reply
+print(json.dumps([reveal_running(name) if r is None else send(r) for r in requests]))
+"""
 
 
 def account(agent, limits, now=None, status="available", **extra):
@@ -113,12 +171,35 @@ class DesktopTests(unittest.TestCase):
             return Widget({"width": WIDTH}, self.usage, limits)
 
     def dispose(self, window):
+        window.tray.stop()
         window.top_bar.stop()
         window.bridge.close()
         window.page().deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def launch(self, name, *requests):
+        """A later launch, in its own process, while this one keeps serving the widget.
+
+        None asks through reveal_running; text is sent raw and its reply returned.
+        """
+        process = subprocess.Popen(
+            [sys.executable, "-c", LAUNCH_CLIENT, name, json.dumps(requests)],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while process.poll() is None and time.monotonic() < deadline:
+                QTest.qWait(10)
+            output = process.communicate(timeout=1)[0]
+        finally:
+            process.kill()
+        return json.loads(output.splitlines()[-1])
 
     @contextmanager
     def renderer(self, limits):
@@ -479,6 +560,362 @@ class DesktopTests(unittest.TestCase):
         finally:
             self.dispose(window)
 
+    def test_zoom_scales_the_window_and_survives_restart(self):
+        self.settings.setValue("appearance", json.dumps({"theme": "light", "zoom": 1.25}))
+        self.settings.sync()
+        window = self.widget(Mock())
+        layouts = []
+        window.bridge.layout_changed.connect(lambda w, s: layouts.append((w, s)))
+        screen = Mock()
+        screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
+        try:
+            self.assertEqual(window.zoomFactor(), 1.25)
+            with patch.object(window, "screen", return_value=screen):
+                window.bridge.request("layout", "layout", '{"height": 400}')
+                self.assertEqual((window.width(), window.height()), (430, 500))
+                for zoom in (2, 0.5, 1.1, 1):
+                    window.apply_preferences({"zoom": zoom})
+                    self.assertEqual(window.zoomFactor(), zoom)
+                    self.assertEqual(
+                        (window.width(), window.height()),
+                        (math.ceil(WIDTH * zoom), math.ceil(400 * zoom)),
+                    )
+                    self.assertEqual(layouts[-1], (WIDTH, 1))
+                # A zoomed panel still fits a smaller screen, as the natural size does.
+                screen.availableGeometry.return_value = QRect(0, 0, 1280, 600)
+                window.apply_preferences({"zoom": 2})
+                width, scale = layouts[-1]
+                self.assertLess(scale, 1)
+                self.assertLessEqual(width * scale * 2, window.width())
+                self.assertLessEqual(400 * scale * 2, window.height())
+                self.assertTrue(screen.availableGeometry().contains(window.geometry()))
+                # Unknown or out-of-range values restore the natural size.
+                screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
+                for invalid in (0.25, 2.5, True, "1.5", None, float("nan")):
+                    window.apply_preferences({"zoom": 1.5})
+                    window.apply_preferences({"zoom": invalid})
+                    self.assertEqual(window.zoomFactor(), 1)
+                    self.assertEqual((window.width(), window.height()), (WIDTH, 400))
+        finally:
+            self.dispose(window)
+        for damaged in ("not json", json.dumps([1.5]), json.dumps({"zoom": 9})):
+            self.settings.setValue("appearance", damaged)
+            self.settings.sync()
+            window = self.widget(Mock())
+            try:
+                self.assertEqual(window.zoomFactor(), 1)
+            finally:
+                self.dispose(window)
+
+    def test_keys_wheel_and_settings_zoom_the_whole_window(self):
+        now = time.time()
+        self.usage.snapshot.return_value = {
+            "rows": [
+                {"id": agent, "agent": agent, "start": now, "tokens": 100, "cost": 0.1}
+                for agent in AGENTS
+            ],
+            "warnings": [],
+        }
+        limits = reporting(*[account(agent, [(300, 50, now + 3600)], now) for agent in AGENTS])
+        screen = Mock()
+        screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
+        with self.renderer(limits) as (window, evaluate, wait_for):
+            with patch.object(window, "screen", return_value=screen):
+                window.apply_size()
+                wait_for(PANEL_FITS)
+                natural = (window.width(), window.height())
+                page = window.focusProxy()
+
+                def press(key):
+                    QTest.keyClick(page, key, Qt.KeyboardModifier.ControlModifier)
+
+                def scroll(notches, modifiers=Qt.KeyboardModifier.ControlModifier):
+                    position = QPointF(100, 100)
+                    event = QWheelEvent(
+                        position,
+                        window.mapToGlobal(position),
+                        QPoint(),
+                        QPoint(0, 120 * notches),
+                        Qt.MouseButton.NoButton,
+                        modifiers,
+                        Qt.ScrollPhase.NoScrollPhase,
+                        False,
+                    )
+                    QApplication.sendEvent(page, event)
+
+                def zoomed(factor):
+                    wait_for(f"preferences.zoom==={factor}")
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and not math.isclose(
+                        window.zoomFactor(), factor, abs_tol=1e-3
+                    ):
+                        QTest.qWait(20)
+                    self.assertAlmostEqual(window.zoomFactor(), factor, places=3)
+                    wait_for(PANEL_FITS)
+                    self.assertEqual(window.width(), math.ceil(WIDTH * factor))
+
+                for key, factor in (
+                    (Qt.Key.Key_Equal, 1.1),
+                    (Qt.Key.Key_Plus, 1.25),
+                    (Qt.Key.Key_Minus, 1.1),
+                ):
+                    press(key)
+                    zoomed(factor)
+                self.assertGreater(window.height(), natural[1])
+                # Each notch is one step at every zoom, though the page sees smaller deltas.
+                for notches, factor in ((1, 1.25), (1, 1.5), (1, 1.75), (1, 2), (1, 2), (-1, 1.75)):
+                    scroll(notches)
+                    zoomed(factor)
+                for _ in range(3):
+                    scroll(-1)
+                zoomed(1.1)
+                # Plain scrolling never zooms.
+                scroll(1, Qt.KeyboardModifier.NoModifier)
+                QTest.qWait(200)
+                zoomed(1.1)
+                press(Qt.Key.Key_0)
+                zoomed(1)
+                self.assertEqual((window.width(), window.height()), natural)
+                # Settings offers the same steps and keeps the open dialog inside the window.
+                window.page().runJavaScript(
+                    "openSettings();$('zoom-setting').value='1.5';"
+                    "$('zoom-setting').dispatchEvent(new Event('change'))"
+                )
+                zoomed(1.5)
+                self.assertEqual(evaluate("$('zoom-setting').value"), "1.5")
+                self.settings.sync()
+                self.assertEqual(json.loads(self.settings.value("appearance"))["zoom"], 1.5)
+                window.page().runJavaScript("$('settings').close()")
+                zoomed(1.5)
+                # Chromium's own zoom is reverted, so the window never falls out of step.
+                window.page().setZoomFactor(0.8)
+                QTest.qWait(300)
+                zoomed(1.5)
+
+    def test_later_launch_reveals_the_hidden_widget(self):
+        name = instance_name(self.root)
+        window = self.widget(Mock())
+        try:
+            window.launches = Launches(window, name)
+            window.show()
+            window.bridge.request("hide", "hide", "null")
+            self.assertFalse(window.isVisible())
+            self.assertTrue(window.preferences.value("hidden", type=bool))
+            self.assertEqual(self.launch(name, None), [True])
+            self.assertTrue(window.isVisible())
+            self.assertFalse(window.preferences.value("hidden", type=bool))
+            # A visible widget is only brought forward.
+            self.assertEqual(self.launch(name, None), [True])
+            self.assertTrue(window.isVisible())
+            # Anything but the one request is dropped without an answer.
+            window.hide()
+            strangers = ("quit\n", REVEAL.decode().strip(), REVEAL.decode() * 2, "x" * 4096)
+            self.assertEqual(self.launch(name, *strangers), [""] * len(strangers))
+            self.assertFalse(window.isVisible())
+        finally:
+            self.dispose(window)
+        # With nothing listening, the caller falls back to its message.
+        self.assertFalse(reveal_running(name, timeout=200))
+        self.assertNotEqual(instance_name(self.root / "other"), name)
+
+    def test_second_launch_reveals_the_first_or_explains_why_it_cannot(self):
+        with (
+            patch("usage.desktop.user_directory", return_value=self.root),
+            patch("usage.desktop.QLockFile") as lock,
+            patch("usage.desktop.QMessageBox.information") as message,
+            patch("usage.desktop.Usage") as usage,
+        ):
+            lock.return_value.tryLock.return_value = False
+            for answered in (True, False):
+                with patch("usage.desktop.reveal_running", return_value=answered) as reveal:
+                    run({"widget": {"width": WIDTH}})
+                    reveal.assert_called_once_with(instance_name(self.root))
+                self.assertEqual(message.call_count, 0 if answered else 1)
+            usage.assert_not_called()
+
+    def test_tray_mirrors_limits_and_controls_the_widget(self):
+        now = time.time()
+        limits = reporting(
+            account("claude", [(300, 14, now + 7200), (10080, 42, now + 345600)], now),
+            account("codex", [(10080, 86, now + 172800)], now),
+        )
+        window = self.widget(limits)
+        tray = window.tray
+        available = "usage.tray.QSystemTrayIcon.isSystemTrayAvailable"
+        try:
+            window.preferences.setValue("appearance", json.dumps({"limitAlert": 80}))
+            # Only Windows with a notification area gets icons, and never the demo.
+            for platform, tray_available, demo in (
+                ("linux", True, False),
+                ("win32", False, False),
+                ("win32", True, True),
+            ):
+                with (
+                    patch("usage.tray.sys.platform", platform),
+                    patch(available, return_value=tray_available),
+                    patch.dict(window.config, {"demo": demo}),
+                ):
+                    self.assertFalse(tray.start())
+            self.assertFalse(tray.timer.isActive())
+            with patch("usage.tray.sys.platform", "win32"), patch(available, return_value=True):
+                self.assertTrue(tray.start())
+            self.assertTrue(tray.timer.isActive())
+            # Before limits arrive, the icon is the app's own.
+            self.assertIsNone(tray.face)
+            self.assertEqual(tray.icon.toolTip(), "Agent Usage")
+            deadline = time.monotonic() + 10
+            while tray.payload is None and time.monotonic() < deadline:
+                QTest.qWait(10)
+            # Nothing chosen: the app's own icon; hovering lists every limit.
+            self.assertIsNone(tray.face)
+            self.assertEqual(
+                tray.icon.toolTip().splitlines(),
+                ["Agent Usage", "Claude Code: 5-hour 14%, Weekly 42%", "Codex: Weekly 86%"],
+            )
+            # A click opens the panel with every limit and its reset.
+            flyout = tray.flyout
+
+            def shown(kind):
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                return flyout.content.findChildren(kind)
+
+            def chosen():
+                return [button.isChecked() for button in shown(QRadioButton)]
+
+            tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+            self.assertTrue(flyout.isVisible())
+            area = flyout.screen().availableGeometry()
+            self.assertTrue(area.contains(flyout.geometry()))
+            texts = [label.text() for label in shown(QLabel)]
+            for text in ("Claude Code", "Codex", "5-hour limit", "14%", "Weekly limit", "42%"):
+                self.assertIn(text, texts)
+            self.assertIn("Resets in 2h 0m", texts)
+            self.assertEqual(chosen(), [False, False, False])
+            # The icon shows the one chosen limit; another replaces it, the same one clears it.
+            claude = AGENTS["claude"].colors[1]
+            for index, face, key, state in (
+                (2, ("86", "#f8e45c", False), "codex::10080", [False, False, True]),
+                (0, ("14", claude, False), "claude::300", [True, False, False]),
+                (0, None, "", [False, False, False]),
+                (2, ("86", "#f8e45c", False), "codex::10080", [False, False, True]),
+            ):
+                QTest.mouseClick(shown(QRadioButton)[index], Qt.MouseButton.LeftButton)
+                self.assertTrue(flyout.isVisible())
+                self.assertEqual(tray.face, face)
+                self.assertEqual(window.preferences.value("tray_limit"), key)
+                self.assertEqual(chosen(), state)
+
+            # Opened from an icon on a bottom taskbar, the panel sits just above it, and
+            # stays there while new limits rebuild it or a reopen anchors it elsewhere.
+            def placed(anchor):
+                QTest.qWait(50)
+                self.assertEqual(flyout.geometry().bottom() + 1 + FLYOUT_MARGIN, anchor.top())
+                self.assertEqual(flyout.height(), flyout.sizeHint().height())
+
+            for left in (area.center().x() - 12, area.center().x() + 100):
+                anchor = QRect(left, area.bottom() - 24, 24, 24)
+                flyout.open(anchor)
+                placed(anchor)
+            codex = account("codex", [(10080, 86, now + 172800)], now)
+            full = account("claude", [(300, 100, now + 600), (10080, 42, now + 345600)], now)
+            stale = account("codex", [(10080, 86, now + 172800)], now, status="stale")
+            # The chosen limit stays on the icon even when another one is higher; while it
+            # is not reported, the app's icon stands in.
+            for agents, face in (
+                ([full, codex], ("86", "#f8e45c", False)),
+                ([stale], ("86", AGENTS["codex"].colors[1], True)),
+                ([full], None),
+                ([codex], ("86", "#f8e45c", False)),
+            ):
+                tray.receive({"agents": agents})
+                placed(anchor)
+                self.assertEqual(tray.face, face)
+            # The choice survives a restart.
+            restarted = self.widget(limits)
+            try:
+                restarted.tray.receive(limits.snapshot())
+                self.assertEqual(restarted.tray.face, ("86", "#f8e45c", False))
+            finally:
+                self.dispose(restarted)
+            # Escape closes the panel; the click that closes it must not reopen it at once.
+            QTest.keyClick(flyout, Qt.Key.Key_Escape)
+            self.assertFalse(flyout.isVisible())
+            tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+            self.assertFalse(flyout.isVisible())
+            QTest.qWait(int(REOPEN_SECONDS * 1000) + 50)
+            tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+            self.assertTrue(flyout.isVisible())
+            tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+            self.assertFalse(flyout.isVisible())
+            # Without limits the icon is the app's own again.
+            tray.receive({"agents": []})
+            self.assertIsNone(tray.face)
+            self.assertEqual(window.preferences.value("tray_limit"), "codex::10080")
+            # A long summary is cut at whole lines, within what Windows displays.
+            tray.receive(
+                {
+                    "agents": [
+                        account(agent, [(300, 50, now + 3600), (10080, 50, now + 3600)], now)
+                        for agent in AGENTS
+                    ]
+                    * 4
+                }
+            )
+            self.assertLessEqual(len(tray.icon.toolTip()), 127)
+            # The panel's footer and the right-click menu show or hide the widget, and quit.
+            window.show()
+            QTest.qWait(int(REOPEN_SECONDS * 1000) + 50)
+            tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+            buttons = {button.text(): button for button in shown(QPushButton)}
+            self.assertEqual(sorted(buttons), ["Hide widget", "Quit"])
+            buttons["Hide widget"].click()
+            self.assertFalse(flyout.isVisible())
+            self.assertFalse(window.isVisible())
+            self.assertTrue(window.preferences.value("hidden", type=bool))
+            tray.activated(QSystemTrayIcon.ActivationReason.Context)
+            self.assertFalse(flyout.isVisible())
+            tray.fill_menu()
+            labels = [action.text() for action in tray.menu.actions()]
+            self.assertEqual(labels, ["Show widget", "Quit"])
+            tray.menu.actions()[0].trigger()
+            self.assertTrue(window.isVisible())
+            self.assertFalse(window.preferences.value("hidden", type=bool))
+            with patch.object(QApplication, "quit") as quit:
+                tray.fill_menu()
+                self.assertEqual(tray.menu.actions()[0].text(), "Hide widget")
+                tray.menu.actions()[-1].trigger()
+                QTest.qWait(int(REOPEN_SECONDS * 1000) + 50)
+                flyout.signature = None  # rebuild, so the button reaches the patched quit
+                tray.activated(QSystemTrayIcon.ActivationReason.Trigger)
+                {button.text(): button for button in shown(QPushButton)}["Quit"].click()
+                self.assertEqual(quit.call_count, 2)
+            tray.stop()
+            self.assertFalse(tray.timer.isActive())
+            self.assertFalse(flyout.isVisible())
+        finally:
+            self.dispose(window)
+
+    def test_notification_area_leaves_limits_out_of_the_widget(self):
+        now = time.time()
+        self.usage.snapshot.return_value = {"rows": [], "warnings": []}
+        limits = reporting(account("claude", [(300, 10, now + 3600)], now))
+        rows = "['visible-limits','indicator-row','limit-setting'].map(id=>$(id).hidden)"
+        with self.renderer(limits) as (window, evaluate, wait_for):
+            wait_for("!$('limits-section').hidden")
+            self.assertEqual(evaluate(rows), [False, False, False])
+            # As with the GNOME top bar, limits the icon shows are not repeated; only the
+            # warning, which colors the icon, still configures them.
+            with (
+                patch("usage.tray.sys.platform", "win32"),
+                patch("usage.tray.QSystemTrayIcon.isSystemTrayAvailable", return_value=True),
+            ):
+                self.assertTrue(window.tray.start())
+            wait_for("$('limits-section').hidden")
+            self.assertEqual(evaluate(rows), [True, True, False])
+            window.tray.stop()
+            wait_for("!$('limits-section').hidden")
+            self.assertEqual(evaluate(rows), [False, False, False])
+
     def test_top_bar_leaves_limits_out_and_day_summary_expands_on_request(self):
         now = time.time()
         self.usage.snapshot.return_value = {
@@ -529,6 +966,8 @@ class DesktopTests(unittest.TestCase):
                 ),
                 ["2", "prompts", "2K", "$0.25"],
             )
+            # Measure only once the window has shrunk from Settings, or growth goes unseen.
+            wait_for(PANEL_FITS)
             height = window.height()
             window.page().runJavaScript("$('detail-toggle').click()")
             wait_for("!$('detail-body').hidden && !$('prompt-inspector').hidden")
@@ -697,17 +1136,7 @@ class DesktopTests(unittest.TestCase):
                 for agent in AGENTS
             ]
         )
-        # No overflow is not enough: shrinking also waits for the native resize.
-        bounds = """(()=>{
-            const p=$('settings').open?$('settings'):document.querySelector('.widget');
-            const r=p.getBoundingClientRect();
-            return r.width>0 && r.height>0 && r.left>=0 && r.top>=0 &&
-                r.right<=innerWidth && r.bottom<=innerHeight &&
-                Math.abs(innerHeight-(r.bottom+r.top))<=2 &&
-                p.scrollHeight<=p.clientHeight+1 &&
-                document.documentElement.scrollHeight<=innerHeight+1 &&
-                document.documentElement.scrollWidth<=innerWidth+1;
-        })()"""
+        bounds = PANEL_FITS
         screen = Mock()
         screen.availableGeometry.return_value = QRect(0, 0, 1920, 1080)
         with self.renderer(limits) as (window, evaluate, wait_for):

@@ -1,9 +1,12 @@
-"""Persistent desktop widget and local-only UI, without a listening port."""
+"""Persistent desktop widget and local-only UI, without a network port."""
 
+import ctypes
+import hashlib
 import json
 import logging
 import math
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,6 +28,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QScreen
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -49,12 +53,89 @@ from .integration import (
 )
 from .limits import Limits
 from .scheduler import Scheduler
+from .tray import Tray
 
 STATIC = Path(__file__).with_name("static").resolve()
 # Account queries keep their own cache; this only bounds how soon the top bar follows.
 TOP_BAR_SECONDS = 5
 # Unchanged limits are republished so the extension can tell an exit from silence.
 TOP_BAR_HEARTBEAT = 60
+# Zoom preference bounds; the renderer offers fixed steps within them.
+ZOOM_RANGE = (0.5, 2.0)
+
+
+def zoom_level(value):
+    """The saved zoom factor when valid, otherwise the natural size."""
+    low, high = ZOOM_RANGE
+    return float(value) if type(value) in (int, float) and low <= value <= high else 1.0
+
+
+# A later launch sends the only request the running widget accepts, and waits for the answer.
+REVEAL = b"reveal\n"
+REVEALED = b"shown\n"
+
+
+def instance_name(state):
+    """Per-user channel between launches; Unix sockets live in the private state directory."""
+    if sys.platform == "win32":
+        # Named pipes share one machine-wide namespace and cannot contain path separators.
+        digest = hashlib.sha256(str(state).casefold().encode()).hexdigest()[:16]
+        return f"agent-usage-{digest}"
+    return str(state / "widget.sock")
+
+
+def reveal_running(name, timeout=2000):
+    """Ask the running widget to show itself; False when nothing answers."""
+    if sys.platform == "win32":
+        # The user started this launch, so it may hand the foreground to the widget (ASFW_ANY).
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)
+    socket = QLocalSocket()
+    socket.connectToServer(name)
+    try:
+        if not socket.waitForConnected(timeout):
+            return False
+        socket.write(REVEAL)
+        if not socket.waitForBytesWritten(timeout):
+            return False
+        while not socket.canReadLine() and socket.waitForReadyRead(timeout):
+            pass
+        return socket.canReadLine() and bytes(socket.readLine()) == REVEALED
+    finally:
+        socket.abort()
+
+
+class Launches(QObject):
+    """Let a later launch reveal this widget, which × only hides, instead of starting again."""
+
+    def __init__(self, widget, name):
+        super().__init__(widget)
+        self.widget = widget
+        self.server = QLocalServer(self)
+        # INVARIANT: only the same user can connect, and only REVEAL does anything.
+        self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        self.server.newConnection.connect(self.accept)
+        # Holding the widget lock proves that a leftover socket belongs to a crashed instance.
+        QLocalServer.removeServer(name)
+        if not self.server.listen(name):
+            logging.warning("Later launches cannot reveal the widget.")
+
+    @Slot()
+    def accept(self):
+        while (socket := self.server.nextPendingConnection()) is not None:
+            socket.readyRead.connect(lambda socket=socket: self.answer(socket))
+            socket.disconnected.connect(socket.deleteLater)
+
+    def answer(self, socket):
+        if socket.bytesAvailable() > len(REVEAL):
+            socket.abort()
+            return
+        if not socket.canReadLine():
+            return
+        if bytes(socket.readLine()) == REVEAL:
+            self.widget.reveal()
+            socket.write(REVEALED)
+            socket.flush()
+        socket.disconnectFromServer()
 
 
 class LocalOnly(QWebEngineUrlRequestInterceptor):
@@ -245,10 +326,14 @@ class Bridge(QObject):
                 # The scheduler never blocks limits from rendering.
                 logging.warning("Scheduler snapshot failed (%s)", type(exc).__name__)
                 scheduled = None
+            # Limits the shell already shows, in the GNOME top bar or the Windows
+            # notification area, are left out of the widget rather than shown twice.
+            top_bar = getattr(getattr(self.window, "top_bar", None), "attached", False)
+            tray = getattr(getattr(self.window, "tray", None), "running", False)
             return dict(
                 snap,
                 refresh_seconds=refresh,
-                top_bar=getattr(getattr(self.window, "top_bar", None), "attached", False),
+                shell_limits=top_bar or tray,
                 scheduler=scheduled,
             )
         if method == "scheduler":
@@ -443,8 +528,17 @@ class Widget(QWebEngineView):
         )
         if config.get("demo"):
             self.preferences.setValue("appearance", json.dumps({"period": "all"}))
+        try:
+            saved = json.loads(self.preferences.value("appearance", "{}"))
+        except (TypeError, ValueError):
+            saved = {}
+        # Applied before the first layout so the window never opens at the wrong size.
+        self.zoom = zoom_level(saved.get("zoom") if isinstance(saved, dict) else None)
+        self.setZoomFactor(self.zoom)
+        self.page().zoomFactorChanged.connect(self.keep_zoom)
         self.bridge = Bridge(usage, limits, self.preferences, self)
         self.top_bar = TopBar(self)
+        self.tray = Tray(self, self.limits_payload)
         self.channel = QWebChannel(self.page())
         self.channel.registerObject("backend", self.bridge)
         self.page().setWebChannel(self.channel)
@@ -458,6 +552,11 @@ class Widget(QWebEngineView):
 
     def apply_preferences(self, values):
         self.top_bar.publish()
+        zoom = zoom_level(values.get("zoom"))
+        if zoom != self.zoom:
+            self.zoom = zoom
+            self.setZoomFactor(zoom)
+            self.apply_size()
         pinned = values.get("pinned") is True
         if gnome_call("SetPinned", pinned):
             return
@@ -479,6 +578,30 @@ class Widget(QWebEngineView):
         super().hideEvent(event)
         self.top_bar.publish()
 
+    def limits_payload(self, snapshot):
+        """Limits as the top bar receives them, for the Windows notification area."""
+        try:
+            preferences = json.loads(self.preferences.value("appearance", "{}"))
+        except (TypeError, ValueError):
+            preferences = {}
+        warning = preferences.get("limitAlert") if isinstance(preferences, dict) else None
+        return top_bar_limits(snapshot, self.bridge.agents, warning, self.isVisible())
+
+    def reveal(self):
+        """Show the widget again, in front, as a later launch of the app expects."""
+        self.preferences.setValue("hidden", False)
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    @Slot(float)
+    def keep_zoom(self, factor):
+        # INVARIANT: only the zoom preference scales the page, so the window can follow it.
+        # Chromium's own gestures and navigation resets would leave the window mis-sized.
+        if not math.isclose(factor, self.zoom, abs_tol=1e-3):
+            self.setZoomFactor(self.zoom)
+
     @Slot(QScreen)
     def watch_screen(self, screen):
         if screen:
@@ -493,15 +616,20 @@ class Widget(QWebEngineView):
             self.fit_content()
 
     def fit_content(self):
+        # Content is measured in CSS pixels; each one spans `zoom` window pixels.
         width = self.config["width"]
-        scale = min(self.layout_scale, self.width() / width, self.height() / self.content_height)
+        scale = min(
+            self.layout_scale,
+            self.width() / (width * self.zoom),
+            self.height() / (self.content_height * self.zoom),
+        )
         self.bridge.layout_changed.emit(width, scale)
 
     @Slot()
     def apply_size(self):
         screen = self.screen().availableGeometry()
-        width = self.config["width"]
-        height = max(120, self.content_height)
+        width = self.config["width"] * self.zoom
+        height = max(120, self.content_height) * self.zoom
         scale = min(1, screen.width() / width, screen.height() / height)
         self.layout_scale = scale
         self.resize(
@@ -524,20 +652,26 @@ def run(config, *, limits=None):
     app.setQuitOnLastWindowClosed(False)
     state = user_directory("state")
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    name = instance_name(state)
     lock = QLockFile(str(state / "widget.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(0):
-        QMessageBox.information(None, "Agent Usage", "Agent Usage is already running.")
+        # An older version, or a busy one, cannot answer; say why nothing opens.
+        if not reveal_running(name):
+            QMessageBox.information(None, "Agent Usage", "Agent Usage is already running.")
         return
     usage = Usage(config)
     widget = Widget(config["widget"], usage, limits or Limits(config))
+    widget.launches = Launches(widget, name)
     usage.start()
     widget.bridge.scheduler.start()
     if not widget.top_bar.start():
         widget.show()
+    widget.tray.start()
     try:
         app.exec()
     finally:
+        widget.tray.stop()
         widget.top_bar.stop()
         widget.preferences.setValue("geometry", widget.saveGeometry())
         widget.preferences.sync()

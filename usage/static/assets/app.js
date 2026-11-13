@@ -17,11 +17,13 @@ const charts = {};
 // Agent metadata comes from the backend registry; nothing here names a specific agent.
 const agents = new Map();
 let chartSignature = '', activitySignature = '', limitSignature = '', heatmapSignature = '';
-let data = null, accounts = [], scheduler = null, failed = false, limitsLoaded = false, topBar = false;
+let data = null, accounts = [], scheduler = null, failed = false, limitsLoaded = false, shellLimits = false;
 let buckets = new Map(), bucketId = null, agentFilter = 'all', promptId = null;
 const feeds = { usage: { seconds: 1 }, limits: { seconds: 1 } };
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
-const preferences = { theme: 'dark', limitAlert: 0, period: 'today', style: 'minimal', pinned: false, indicator: 'bar', hiddenLimits: [], details: false };
+const preferences = { theme: 'dark', limitAlert: 0, period: 'today', style: 'minimal', pinned: false, indicator: 'bar', hiddenLimits: [], details: false, zoom: 1 };
+// Matches the Settings options; the backend resizes the window to each factor.
+const zoomLevels = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const pending = new Map();
 let sequence = 0;
 const backendReady = new Promise(resolve => new QWebChannel(qt.webChannelTransport, channel => {
@@ -57,6 +59,17 @@ function applyTheme() {
 
 function savePreferences() {
   native('save_preferences', preferences).catch(error => settingsMessage(error.message));
+}
+
+function setZoom(value) {
+  if (!zoomLevels.includes(value) || value === preferences.zoom) return;
+  preferences.zoom = value; $('zoom-setting').value = String(value);
+  hideHeatmapTooltip(); savePreferences();
+}
+
+function stepZoom(direction) {
+  const index = zoomLevels.indexOf(preferences.zoom) + direction;
+  setZoom(zoomLevels[Math.max(0, Math.min(zoomLevels.length - 1, index))]);
 }
 
 function updatePeriod() {
@@ -443,7 +456,7 @@ function countdown(item) {
 function renderLimitOptions() {
   const durations = [...new Set(activeAccounts().flatMap(account => account.windows.map(w => w.minutes)))].sort((a, b) => b - a);
   // With the top bar showing limits, the widget's own limit display has nothing to configure.
-  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length || topBar;
+  $('visible-limits').hidden = $('indicator-row').hidden = !durations.length || shellLimits;
   $('limit-setting').hidden = !durations.length;
   const options = $('limit-options'), signature = JSON.stringify(durations);
   if (options.dataset.signature !== signature) {
@@ -911,7 +924,7 @@ function renderLimits() {
   const signature = JSON.stringify([visible, missing, preferences.limitAlert, preferences.hiddenLimits, document.documentElement.dataset.theme, Math.floor(Date.now() / 60000)]);
   renderLimitOptions();
   // The GNOME top bar already shows limits; the widget then keeps to activity.
-  $('limits-section').hidden = topBar ||
+  $('limits-section').hidden = shellLimits ||
     !visible.some(account => account.windows.some(w => !preferences.hiddenLimits.includes(w.minutes))) && !missing.length;
   if (signature === limitSignature) return;
   limitSignature = signature;
@@ -953,7 +966,7 @@ async function refresh(name) {
     feed.seconds = next.refresh_seconds || feed.seconds;
     if (name === 'usage') { data = next; failed = false; }
     else if (revision === connectionRevision && !connectionTask) {
-      accounts = next.agents; topBar = next.top_bar === true; limitsLoaded = true;
+      accounts = next.agents; shellLimits = next.shell_limits === true; limitsLoaded = true;
       if (next.scheduler && scheduled === scheduleRevision && !scheduleEdits.size) scheduler = next.scheduler;
     }
   } catch {
@@ -974,6 +987,7 @@ function changePeriod(value) {
 async function openSettings() {
   hideHeatmapTooltip(); updateWarningControl(); settingsMessage();
   for (const key of ['theme', 'style', 'indicator']) $(key + '-setting').value = preferences[key];
+  $('zoom-setting').value = String(preferences.zoom);
   $('pinned-setting').checked = preferences.pinned;
   $('settings').showModal(); reportSize();
   try {
@@ -1021,6 +1035,29 @@ $('limit-options').addEventListener('change', event => {
   savePreferences(); renderLimits(); reportSize();
 });
 $('pinned-setting').addEventListener('change', () => { preferences.pinned = $('pinned-setting').checked; savePreferences(); });
+$('zoom-setting').addEventListener('change', () => setZoom(Number($('zoom-setting').value)));
+document.addEventListener('keydown', event => {
+  if (!event.ctrlKey || event.altKey) return;
+  const step = { '+': 1, '=': 1, '-': -1, '_': -1, '0': 0 }[event.key];
+  if (step === undefined) return;
+  event.preventDefault();
+  step ? stepZoom(step) : setZoom(1);
+});
+// One step per scroll notch (60 screen px at default settings); finer deltas accumulate.
+// Deltas arrive in CSS pixels, which the current zoom shrinks, so they are scaled back.
+let zoomWheel = 0, zoomWheelTimer = 0;
+document.addEventListener('wheel', event => {
+  if (!event.ctrlKey) return;
+  // Chromium's own zoom would scale the page without resizing the window.
+  event.preventDefault();
+  clearTimeout(zoomWheelTimer);
+  zoomWheelTimer = setTimeout(() => { zoomWheel = 0; }, 300);
+  zoomWheel += event.deltaY * [1, 20, innerHeight][event.deltaMode] * preferences.zoom;
+  if (Math.abs(zoomWheel) < 50) return;
+  // Chromium coalesces queued events, so one event can carry several notches.
+  const notches = Math.max(1, Math.round(Math.abs(zoomWheel) / 60));
+  stepZoom(zoomWheel < 0 ? notches : -notches); zoomWheel = 0;
+}, { passive: false });
 $('help-toggle').addEventListener('click', () => {
   $('help').hidden = !$('help').hidden;
   $('help-toggle').setAttribute('aria-expanded', String(!$('help').hidden));
@@ -1109,6 +1146,7 @@ Promise.all([native('agents'), native('preferences')]).then(([registry, saved]) 
   if (Array.isArray(saved.hiddenLimits)) preferences.hiddenLimits = [...new Set(saved.hiddenLimits.filter(value => Number.isInteger(value) && value > 0))];
   preferences.pinned = saved.pinned === true;
   preferences.details = saved.details === true;
+  if (zoomLevels.includes(saved.zoom)) preferences.zoom = saved.zoom;
   // Saving drops preferences that no longer exist.
   updatePeriod(); applyTheme(); savePreferences();
 }).catch(error => settingsMessage(error.message)).finally(() => { refresh('usage'); refresh('limits'); });

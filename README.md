@@ -32,6 +32,22 @@ folder**, and open `agent-usage` on Linux or `agent-usage.exe` on Windows. Pytho
 and Qt are included. Keep the `_internal` directory beside the executable.
 On Windows, the first launch adds **Agent Usage** to the Start menu.
 
+<details>
+<summary>Windows says the app is from an unknown publisher</summary>
+
+The portable app is not code-signed yet, so Windows cannot name its publisher.
+First check that the download is intact: in PowerShell, run
+`Get-FileHash agent-usage-windows-x86_64.zip` and compare the hash with
+`SHA256SUMS` from the same release.
+
+- **SmartScreen** ("Windows protected your PC"): choose **More info → Run anyway**,
+  or open the zip's **Properties**, select **Unblock** and then extract it, so the
+  warning does not appear.
+- **Smart App Control** blocks unsigned apps and offers no per-app exception.
+  While it is on, a release cannot open until releases are signed.
+
+</details>
+
 **From source:** install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and Git, then run:
 
@@ -60,14 +76,20 @@ temporary profile, makes no account queries, and removes the profile on exit.
 </p>
 
 - **Header:** drag it to move the widget. Agent icons filter the activity; the
-  gear opens Settings; × quits.
+  gear opens Settings; × hides the widget. Open Agent Usage again, or on Windows
+  choose **Show widget** from its notification area icon, to bring it back.
 - **Limits:** one card per agent, with each reported window and its reset. When
-  the GNOME top bar shows limits, the widget leaves them out.
+  the GNOME top bar or the Windows notification area shows limits, the widget
+  leaves them out instead of showing them twice.
 - **Today**, **Weekly** and **History** choose the period. Click a day to see its
   totals; click the summary below to open its chart and prompts.
 - **Settings:** visible limits, bars or rings, a usage warning, theme, style,
-  keep on top, agent connections, history folders, per-agent window schedulers,
+  zoom, keep on top, agent connections, history folders, per-agent window schedulers,
   and export or import. The **?** button explains how the numbers are measured.
+- **Zoom:** Ctrl + scroll, Ctrl + `+` / Ctrl + `−`, or
+  **Settings → Zoom** scales the widget from 50% to 200%; Ctrl + `0` resets it.
+  The window grows and shrinks with its content and still fits smaller screens.
+  The zoom persists across restarts.
 - **Window scheduler:** in **Settings → Agents → Window scheduler**, one switch
   starts an agent's short usage window automatically, early enough that the quota
   resets during your work instead of after it. Each day has one start; from it until
@@ -113,6 +135,21 @@ returns if the extension is disabled. The demo does not publish to the top bar.
 After updating, run the command again and sign out and back in. Remove it with
 `agent-usage --uninstall-gnome` from the same installation; history is kept.
 
+## Windows notification area
+
+On Windows, Agent Usage adds an icon beside the clock. Windows 11 places new icons
+in the overflow (**^**) first; to keep it visible, drag it onto the taskbar or turn
+it on under **Settings → Personalization → Taskbar → Other system tray icons**.
+
+Click the icon to open a panel beside it with each limit's use and reset, as the
+GNOME top bar menu shows them; hover to see every limit at once. Select one limit in
+the panel to show it on the icon: its used percentage, in the agent's color, turning
+yellow at the usage warning and red at 100%, and fading while outdated. Selecting
+another replaces it; selecting it again clears it. With nothing selected, or while
+the selected limit is not reported, the icon is the app's black-and-white one. The
+panel closes with a click elsewhere or Escape. The panel and the icon's right-click
+menu show or hide the widget and quit. The demo adds no icon.
+
 ## Understand the data
 
 - **Limits** come from each agent's account and cover all of its usage. Local
@@ -138,7 +175,8 @@ kept, and reconnecting collects what was recorded meanwhile. **History folder**
 overrides an agent's session directory.
 
 The archive keeps usage metadata, short prompt titles and file bookkeeping in
-SQLite, never conversation text. There is no analytics service or listening port.
+SQLite, never conversation text. There is no analytics service or network port; a
+later launch reaches the running widget through a local channel only your user can open.
 Limit queries contact each provider through its own installed client.
 
 | System | History and preferences |
@@ -184,7 +222,7 @@ then delete the application folder and its shortcut.
 | --- | --- |
 | Linux desktop | Persistent window; positioning and pinning depend on the compositor |
 | GNOME 50 | Optional top bar and desktop placement across workspaces |
-| Windows x64 | Persistent window with **Keep on top** |
+| Windows x64 | Persistent window with **Keep on top**; limits in the notification area |
 | macOS, other GNOME versions | Not currently supported |
 
 CI runs the tests on Linux and Windows at both ends of the supported Python range.
@@ -226,7 +264,9 @@ uv build
 
 To build a portable app, run `uv run --group build python scripts/package.py`, then
 `node tests/smoke.mjs dist/agent-usage/agent-usage` (`agent-usage.exe` on Windows).
-Build on the target operating system; Node 22+ is needed for the UI tests. Tags
+Build on the target operating system; Node 22+ is needed for the UI tests. The app
+icon is `usage/static/assets/widget.svg`; after changing it, regenerate the Windows
+icon with `uv run python scripts/icon.py`. Tags
 matching the package version, such as `v0.1.0`, trigger checks, native builds,
 checksums and a GitHub release.
 

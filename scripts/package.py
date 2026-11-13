@@ -9,10 +9,39 @@ import sysconfig
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Qt bindings the app never imports, on any platform (QtDBus serves GNOME, so it stays).
+# Their PyInstaller hooks would bundle every QML plugin and the Qt libraries those load,
+# none of which the widget opens; the Qt libraries Chromium needs are still collected
+# from the binaries that link them. A test keeps this list apart from the app's imports.
+UNUSED_MODULES = ("QtOpenGL", "QtPositioning", "QtQml", "QtQuick", "QtQuickWidgets")
+# Qt WebEngine data the widget never reads: debug-build resources, the DevTools UI
+# (remote debugging still works), Qt's UI translations and Chromium's non-English
+# strings. The widget is English; Chromium falls back to en-US, which stays.
+UNUSED_DATA = (
+    "*.debug.pak",
+    "qtwebengine_devtools_resources.pak",
+    "translations/*.qm",
+    "qtwebengine_locales/*.pak",
+)
+KEPT_DATA = ("qtwebengine_locales/en-US.pak",)
+
+
+def prune(bundle):
+    """Delete unused Qt data from a built bundle; returns the removed files' paths."""
+    kept = {path for pattern in KEPT_DATA for path in bundle.rglob(pattern)}
+    removed = sorted(
+        {path for pattern in UNUSED_DATA for path in bundle.rglob(pattern) if path not in kept}
+    )
+    for path in removed:
+        path.unlink()
+    return removed
 
 
 def main():
-    options = ["--hide-console", "hide-early"] if sys.platform == "win32" else []
+    options = []
+    if sys.platform == "win32":
+        icon = ROOT / "usage/static/assets/widget.ico"
+        options = ["--hide-console", "hide-early", "--icon", str(icon)]
     subprocess.run(
         [
             sys.executable,
@@ -26,6 +55,7 @@ def main():
             str(ROOT),
             "--collect-data",
             "usage",
+            *(arg for name in UNUSED_MODULES for arg in ("--exclude-module", f"PySide6.{name}")),
             *options,
             "usage/__main__.py",
         ],
@@ -33,6 +63,8 @@ def main():
         check=True,
     )
     bundle = ROOT / "dist/agent-usage"
+    removed = prune(bundle)
+    print(f"Pruned {len(removed)} unused Qt files")
     for name in ("LICENSE", "README.md"):
         shutil.copy2(ROOT / name, bundle / name)
     shutil.copytree(ROOT / ".github/assets", bundle / ".github/assets", dirs_exist_ok=True)

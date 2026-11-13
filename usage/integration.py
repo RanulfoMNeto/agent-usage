@@ -85,7 +85,13 @@ def install_windows_shortcut(config=None):
         windowed = Path(args[0]).with_name("pythonw.exe")
         if windowed.is_file():
             args[0] = str(windowed)
-    entry = dict(path=str(shortcut), target=args[0], arguments=subprocess.list2cmdline(args[1:]))
+    entry = dict(
+        path=str(shortcut),
+        target=args[0],
+        arguments=subprocess.list2cmdline(args[1:]),
+        # The app's own icon, not the interpreter's when it runs from source.
+        icon=str(STATIC / "assets/widget.ico"),
+    )
     powershell = (
         Path(os.environ.get("SystemRoot", r"C:\Windows"))
         / "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -104,7 +110,7 @@ $link.TargetPath = $entry.target
 $link.Arguments = $entry.arguments
 $link.WorkingDirectory = Split-Path -LiteralPath $entry.target
 $link.Description = 'Agent Usage'
-$link.IconLocation = $entry.target + ',0'
+$link.IconLocation = $entry.icon + ',0'
 $link.Save()
 """,
         ],

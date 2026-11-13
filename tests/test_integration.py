@@ -13,6 +13,7 @@ from unittest.mock import patch
 from usage.agents import AGENTS
 from usage.desktop import top_bar_limits
 from usage.integration import (
+    STATIC,
     UUID,
     ConnectionUnavailable,
     install_gnome,
@@ -127,7 +128,8 @@ class IntegrationTests(unittest.TestCase):
                             "-NonInteractive",
                             "-Command",
                             "$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AGENT_USAGE_TEST_LINK);"
-                            "$link | Select-Object TargetPath,Arguments,WorkingDirectory | ConvertTo-Json",
+                            "$link | Select-Object TargetPath,Arguments,WorkingDirectory,IconLocation"
+                            " | ConvertTo-Json",
                         ],
                         env={**os.environ, "AGENT_USAGE_TEST_LINK": str(shortcut)},
                         check=True,
@@ -144,6 +146,9 @@ class IntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(actual["Arguments"], subprocess.list2cmdline(args[1:]))
                 self.assertEqual(Path(actual["WorkingDirectory"]), Path(args[0]).parent)
+                # The app's own icon, not the interpreter's.
+                icon = f"{STATIC / 'assets/widget.ico'},0"
+                self.assertEqual(actual["IconLocation"], icon)
                 moved = root / "new folder" / "agent-usage.exe"
                 with (
                     patch("usage.integration.launch_command", return_value=[str(moved)]),
@@ -153,6 +158,7 @@ class IntegrationTests(unittest.TestCase):
                 actual = read_shortcut()
                 self.assertEqual(Path(actual["TargetPath"]), moved)
                 self.assertEqual(actual["Arguments"], "")
+                self.assertEqual(actual["IconLocation"], icon)
 
     def test_install_reinstall_remove_preserve_other_extensions_and_history(self):
         with tempfile.TemporaryDirectory() as folder:
