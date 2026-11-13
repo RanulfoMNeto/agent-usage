@@ -91,6 +91,17 @@ class Claude(Agent):
         return []
 
     @staticmethod
+    def reported(payload):
+        """A usage reply that carries limits; one without them is not an empty account."""
+        if payload.get("rate_limits_available") is not True:
+            raise AgentUnavailable("unsupported_account")
+        # Claude Code 2.1.316 leaves limits out when asked to skip behaviors, so usage is
+        # requested in full; a reply that still omits them is a failure, never "no limits".
+        if not isinstance(payload.get("rate_limits"), dict):
+            raise RuntimeError("Native account query returned no limits")
+        return payload
+
+    @staticmethod
     def windows(payload):
         windows = []
         limits = payload.get("rate_limits") or {}
@@ -157,10 +168,8 @@ class Claude(Agent):
                     initialized = await request("initialize")
                     if (initialized.get("account") or {}).get("tokenSource") == "none":
                         raise AgentUnavailable("login_required")
-                    payload = await request("get_usage", skip_behaviors=True)
-                    if payload.get("rate_limits_available") is not True:
-                        raise AgentUnavailable("unsupported_account")
-                    return self.windows(payload)
+                    payload = await request("get_usage")
+                    return self.windows(self.reported(payload))
             finally:
                 await stop(process)
 
@@ -225,10 +234,9 @@ class Claude(Agent):
                     initialized = await request("initialize", "initialize")
                     if (initialized.get("account") or {}).get("tokenSource") == "none":
                         raise AgentUnavailable("login_required")
-                    payload = await request("get_usage", "get_usage", skip_behaviors=True)
-                    if payload.get("rate_limits_available") is not True:
-                        raise AgentUnavailable("unsupported_account")
-                    windows = self.windows(payload)
+                    payload = await request("get_usage", "get_usage")
+                    # Without reported limits, the guards below could not stop a turn.
+                    windows = self.windows(self.reported(payload))
                     if any(w["used_percent"] >= 100 for w in windows):
                         return dict(activated=False, reason="weekly_exhausted", windows=windows)
                     if any(w["minutes"] < 10080 and w["used_percent"] > 0 for w in windows):
@@ -251,7 +259,7 @@ class Claude(Agent):
                             turned = True
                             break
                     try:
-                        after = await request("get_usage_after", "get_usage", skip_behaviors=True)
+                        after = await request("get_usage_after", "get_usage")
                         windows = self.windows(after) or windows
                     except (AgentUnavailable, RuntimeError, OSError):
                         pass
