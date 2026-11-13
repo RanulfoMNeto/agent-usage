@@ -19,7 +19,7 @@ its own. API-key accounts do not report subscription limits. Windows and WSL are
 separate environments.
 
 ¹ Claude Code's `get_usage` control request is the **experimental** interface used
-by its VS Code extension, verified with version 2.1.301; it may change. Queries send
+by its VS Code extension, verified with version 2.1.316; it may change. Queries send
 control requests only, with tools, hooks and session persistence disabled.
 
 New agents are added as modules; see [Adding an agent](#adding-an-agent).

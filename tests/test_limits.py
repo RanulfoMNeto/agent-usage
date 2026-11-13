@@ -261,7 +261,7 @@ time.sleep(30)
         with tempfile.TemporaryDirectory() as directory, tracking:
             script = Path(directory) / "native.py"
             script.write_text(
-                "import json, os, sys, time\nassert not os.listdir('.')\nmode=sys.argv[1]\nassert '--safe-mode' in sys.argv and '--no-session-persistence' in sys.argv\nfor line in sys.stdin:\n    msg=json.loads(line)\n    assert msg['type']=='control_request'\n    kind=msg['request']['subtype']\n    assert kind in ('initialize', 'get_usage')\n    response={'subtype':'success','request_id':msg['request_id']}\n    if kind=='initialize':\n        response['response']={'account':{'tokenSource':'none'} if mode=='signed-out' else {'email':'PRIVATE'}}\n    else:\n        assert msg['request']['skip_behaviors'] is True\n        if mode=='hang': time.sleep(30)\n        if mode=='unsupported': response.update(subtype='error',error='Unsupported control request subtype: get_usage')\n        elif mode=='permission':\n            print(json.dumps({'type':'control_request','request':{'subtype':'can_use_tool'}}),flush=True)\n            time.sleep(30)\n        else: response['response']={'rate_limits_available':mode!='api-key','rate_limits':{'five_hour':{'utilization':0,'resets_at':'2099-01-01T00:00:00Z'}}}\n    print(json.dumps({'type':'control_response','response':response}),flush=True)\n"
+                "import json, os, sys, time\nassert not os.listdir('.')\nmode=sys.argv[1]\nassert '--safe-mode' in sys.argv and '--no-session-persistence' in sys.argv\nfor line in sys.stdin:\n    msg=json.loads(line)\n    assert msg['type']=='control_request'\n    kind=msg['request']['subtype']\n    assert kind in ('initialize', 'get_usage')\n    response={'subtype':'success','request_id':msg['request_id']}\n    if kind=='initialize':\n        response['response']={'account':{'tokenSource':'none'} if mode=='signed-out' else {'email':'PRIVATE'}}\n    else:\n        # Like Claude Code 2.1.316: skipping behaviors also leaves the limits out.\n        skipped=msg['request'].get('skip_behaviors') is True\n        if mode=='hang': time.sleep(30)\n        if mode=='unsupported': response.update(subtype='error',error='Unsupported control request subtype: get_usage')\n        elif mode=='permission':\n            print(json.dumps({'type':'control_request','request':{'subtype':'can_use_tool'}}),flush=True)\n            time.sleep(30)\n        else: response['response']={'rate_limits_available':mode!='api-key','rate_limits':None if skipped or mode=='no-limits' else {'five_hour':{'utilization':0,'resets_at':'2099-01-01T00:00:00Z'}}}\n    print(json.dumps({'type':'control_response','response':response}),flush=True)\n"
             )
             windows = asyncio.run(Claude().read_limits([sys.executable, str(script), "ok"], 5))
             self.assertEqual([w["used_percent"] for w in windows], [0])
@@ -270,6 +270,7 @@ time.sleep(30)
                 ("signed-out", AgentUnavailable, "login_required"),
                 ("api-key", AgentUnavailable, "unsupported_account"),
                 ("unsupported", AgentUnavailable, "unsupported_version"),
+                ("no-limits", RuntimeError, "returned no limits"),
                 ("permission", RuntimeError, "Unexpected native permission request"),
                 ("hang", TimeoutError, ""),
             ):
@@ -334,16 +335,18 @@ for line in sys.stdin:
         elif kind == 'get_usage':
             five = 15 if mode == 'active' or turns > 0 else 0
             seven = 100 if mode == 'exhausted' else 25
+            # Like Claude Code 2.1.316: skipping behaviors also leaves the limits out.
+            skipped = msg['request'].get('skip_behaviors') is True
             resp['response'] = {
                 'rate_limits_available': mode != 'api-key',
-                'rate_limits': {
+                'rate_limits': None if skipped or mode == 'no-limits' else {
                     'five_hour': {'utilization': five, 'resets_at': '2099-01-01T05:00:00Z'},
                     'seven_day': {'utilization': seven, 'resets_at': '2099-01-07T00:00:00Z'},
                 },
             }
         print(json.dumps({'type': 'control_response', 'response': resp}), flush=True)
     elif msg['type'] == 'user':
-        assert mode not in ('active', 'exhausted'), 'Should not send user turn when guarded'
+        assert mode not in ('active', 'exhausted', 'no-limits'), 'Should not send user turn when guarded'
         assert msg['message']['content'] == '.'
         turns += 1
         if mode == 'hang':
@@ -379,6 +382,7 @@ for line in sys.stdin:
             for mode, error in (
                 ("signed-out", AgentUnavailable),
                 ("api-key", AgentUnavailable),
+                ("no-limits", RuntimeError),
                 ("error", RuntimeError),
                 ("hang", TimeoutError),
             ):
