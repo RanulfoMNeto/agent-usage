@@ -73,6 +73,8 @@ def zoom_level(value):
 # A later launch sends the only request the running widget accepts, and waits for the answer.
 REVEAL = b"reveal\n"
 REVEALED = b"shown\n"
+# A launch that never closes its end after the answer is dropped after this long.
+ANSWER_SECONDS = 5
 
 
 def instance_name(state):
@@ -95,12 +97,14 @@ def reveal_running(name, timeout=2000):
         if not socket.waitForConnected(timeout):
             return False
         socket.write(REVEAL)
-        if not socket.waitForBytesWritten(timeout):
-            return False
+        # Only the answer proves the request arrived: on Windows a write can finish
+        # before this wait starts, which then reports that nothing was written.
+        socket.waitForBytesWritten(timeout)
         while not socket.canReadLine() and socket.waitForReadyRead(timeout):
             pass
         return socket.canReadLine() and bytes(socket.readLine()) == REVEALED
     finally:
+        # This side closes: the widget's side closing first could drop the answer unread.
         socket.abort()
 
 
@@ -131,11 +135,15 @@ class Launches(QObject):
             return
         if not socket.canReadLine():
             return
-        if bytes(socket.readLine()) == REVEAL:
-            self.widget.reveal()
-            socket.write(REVEALED)
-            socket.flush()
-        socket.disconnectFromServer()
+        if bytes(socket.readLine()) != REVEAL:
+            socket.disconnectFromServer()
+            return
+        # Answer before showing the window, which can be slow, and leave closing to the
+        # launch: on Windows, disconnecting a pipe discards an answer not yet read.
+        socket.write(REVEALED)
+        socket.flush()
+        QTimer.singleShot(ANSWER_SECONDS * 1000, socket, socket.abort)
+        self.widget.reveal()
 
 
 class LocalOnly(QWebEngineUrlRequestInterceptor):
