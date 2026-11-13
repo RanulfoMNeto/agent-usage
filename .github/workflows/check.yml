@@ -3,7 +3,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_call:
 permissions:
   contents: read
 concurrency:
@@ -30,7 +29,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libegl1 libopengl0 libxcb-cursor0
-      - run: python -m pip install uv==0.11.6
+      # After setup-python, so the cache key carries the matrix Python. The cache keeps
+      # downloaded wheels, PySide6 included, and is renewed when uv.lock changes.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.11.6'
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
